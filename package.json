@@ -1,0 +1,58 @@
+{
+  "name": "mailtea-mcp",
+  "version": "0.1.0",
+  "description": "Mailtea MCP server — let AI agents send, schedule, and manage email over Model Context Protocol.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "mailtea-mcp": "bin/mailtea-mcp.mjs"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "bin",
+    "README.md"
+  ],
+  "keywords": [
+    "mailtea",
+    "mcp",
+    "model-context-protocol",
+    "email",
+    "newsletter",
+    "ai-agent",
+    "claude"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mailtea-app/mailtea.git",
+    "directory": "packages/mcp"
+  },
+  "homepage": "https://mailtea.app",
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./stdio": {
+      "types": "./dist/stdio.d.ts",
+      "default": "./dist/stdio.js"
+    }
+  },
+  "scripts": {
+    "dev": "tsup src/index.ts src/stdio.ts --watch --format esm --dts",
+    "build": "tsup src/index.ts src/stdio.ts --format esm --dts --clean",
+    "prepublishOnly": "pnpm run build",
+    "typecheck": "tsc --noEmit",
+    "lint": "echo \"No lint for mailtea-mcp yet\"",
+    "test": "node --import ./node_modules/tsx/dist/loader.mjs --test src/**/*.test.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.5",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.2"
+  }
+}
