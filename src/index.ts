@@ -2215,7 +2215,12 @@ export const MCP_TOOLS = [
             "opt_out = subscribed by default (recipients may opt out); opt_in = only explicitly opted-in recipients receive it."
         },
         description: { type: "string" },
-        visibility: { type: "string", enum: ["public", "private"] }
+        visibility: {
+          type: "string",
+          enum: ["public", "private"],
+          description:
+            "public = the tag becomes a reader-facing topic (an unsubscribe group) on the preferences page, using its description as the reader-facing copy; private = internal only, never shown to readers."
+        }
       },
       required: ["publicationId", "name", "default_subscription"]
     }
@@ -2248,7 +2253,12 @@ export const MCP_TOOLS = [
           description:
             "opt_out = subscribed by default (recipients may opt out); opt_in = only explicitly opted-in recipients receive it."
         },
-        visibility: { type: "string", enum: ["public", "private"] }
+        visibility: {
+          type: "string",
+          enum: ["public", "private"],
+          description:
+            "public = the tag becomes a reader-facing topic (an unsubscribe group) on the preferences page, using its description as the reader-facing copy; private = internal only, never shown to readers."
+        }
       },
       required: ["publicationId", "tagId"]
     }
