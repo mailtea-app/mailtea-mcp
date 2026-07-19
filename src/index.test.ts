@@ -2911,6 +2911,98 @@ test("email.send rejects a missing required field before any request", async () 
   assert.match(response.error!.message, /Missing required field: subject/);
 });
 
+test("email.send forwards sender_id when used instead of from", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return restOk({ id: "email_sid" });
+  };
+
+  const response = await handleMcpRequest(
+    {
+      jsonrpc: "2.0",
+      id: 5,
+      method: "tools/call",
+      params: {
+        name: "email.send",
+        arguments: {
+          sender_id: "snd_123",
+          to: "user@example.com",
+          subject: "Hi",
+          html: "<p>Hello</p>"
+        }
+      }
+    },
+    { apiBaseUrl: "http://localhost:8787", token: "pat_test_token", fetchImpl }
+  );
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(JSON.parse(String(calls[0]!.init?.body)), {
+    sender_id: "snd_123",
+    to: "user@example.com",
+    subject: "Hi",
+    html: "<p>Hello</p>"
+  });
+  const result = readJsonRpcResult(response);
+  assert.deepEqual(result.structuredContent, { id: "email_sid" });
+});
+
+test("email.send rejects providing both from and sender_id before any request", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return restOk({ id: "should_not_happen" });
+  };
+
+  const response = await handleMcpRequest(
+    {
+      jsonrpc: "2.0",
+      id: 6,
+      method: "tools/call",
+      params: {
+        name: "email.send",
+        arguments: {
+          from: "Acme <hello@acme.com>",
+          sender_id: "snd_123",
+          to: "user@example.com",
+          subject: "Hi",
+          html: "<p>Hello</p>"
+        }
+      }
+    },
+    { apiBaseUrl: "http://localhost:8787", token: "pat_test_token", fetchImpl }
+  );
+
+  assert.equal(calls.length, 0);
+  assert.ok(response.error);
+  assert.match(response.error!.message, /exactly one of 'from' or 'sender_id'/);
+});
+
+test("email.send rejects providing neither from nor sender_id", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return restOk({ id: "should_not_happen" });
+  };
+
+  const response = await handleMcpRequest(
+    {
+      jsonrpc: "2.0",
+      id: 7,
+      method: "tools/call",
+      params: {
+        name: "email.send",
+        arguments: { to: "user@example.com", subject: "Hi", html: "<p>Hello</p>" }
+      }
+    },
+    { apiBaseUrl: "http://localhost:8787", token: "pat_test_token", fetchImpl }
+  );
+
+  assert.equal(calls.length, 0);
+  assert.ok(response.error);
+  assert.match(response.error!.message, /exactly one of 'from' or 'sender_id'/);
+});
+
 test("email.batch sends a bare array body to /v1/emails/batch", async () => {
   const calls: FetchCall[] = [];
   const fetchImpl: typeof fetch = async (url, init) => {

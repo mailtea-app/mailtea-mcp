@@ -349,6 +349,41 @@ type PublicationDomainUpsertResult = {
   domain: PublicationDomainRecord;
 };
 
+type SenderRecord = {
+  id: string;
+  publicationId: string;
+  name: string;
+  email: string;
+  replyTo: string | null;
+  isDefault: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type SenderMutationResult = {
+  sender: SenderRecord | null;
+};
+
+type SenderRemoveResult = {
+  removed: boolean;
+  senderId: string;
+};
+
+type SuppressionEntryRecord = {
+  id: string;
+  email: string;
+  reason: string;
+  source: string;
+  publicationId: string | null;
+  createdAt: string;
+};
+
+type SuppressionSearchResult = {
+  entries: SuppressionEntryRecord[];
+  hasMore: boolean;
+  nextCursor: string | null;
+};
+
 type PublicationWorkspaceRecord = {
   id: string;
   name: string;
@@ -597,6 +632,117 @@ export const MCP_TOOLS = [
         publicationId: { type: "string" }
       },
       required: ["publicationId"]
+    }
+  },
+  {
+    name: "sender.list",
+    description: "List named from-identities (senders) for a publication",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" },
+        limit: { type: "number" }
+      },
+      required: ["publicationId"]
+    }
+  },
+  {
+    name: "sender.create",
+    description:
+      "Create a named sender. The email domain must be a verified, DKIM-verified sending domain of the publication.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" },
+        name: { type: "string" },
+        email: { type: "string" },
+        replyTo: { type: "string" },
+        isDefault: { type: "boolean" }
+      },
+      required: ["publicationId", "name", "email"]
+    }
+  },
+  {
+    name: "sender.update",
+    description: "Update a sender's name, reply-to, or default flag. Email is immutable.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" },
+        senderId: { type: "string" },
+        name: { type: "string" },
+        replyTo: { type: "string" },
+        isDefault: { type: "boolean" }
+      },
+      required: ["publicationId", "senderId"]
+    }
+  },
+  {
+    name: "sender.set_default",
+    description: "Make a sender the publication's default from-identity",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" },
+        senderId: { type: "string" }
+      },
+      required: ["publicationId", "senderId"]
+    }
+  },
+  {
+    name: "sender.delete",
+    description: "Remove a named sender",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" },
+        senderId: { type: "string" }
+      },
+      required: ["publicationId", "senderId"]
+    }
+  },
+  {
+    name: "suppression.search",
+    description:
+      "Search the organization's suppression list (addresses that will never be emailed). Filter by reason or email substring.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        reason: {
+          type: "string",
+          enum: ["bounced", "complained", "manual", "unsubscribed", "invalid", "unknown"]
+        },
+        query: { type: "string", description: "Email substring to match." },
+        limit: { type: "number" }
+      }
+    }
+  },
+  {
+    name: "suppression.add",
+    description:
+      "Add addresses to the organization's suppression list. They will be excluded from all sends across every publication.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        emails: { type: "array", items: { type: "string" } },
+        reason: {
+          type: "string",
+          enum: ["bounced", "complained", "manual", "unsubscribed", "invalid", "unknown"]
+        }
+      },
+      required: ["emails"]
+    }
+  },
+  {
+    name: "suppression.remove",
+    description:
+      "Remove addresses from the organization's suppression list. Matching contacts are restored to active/unsubscribed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        emails: { type: "array", items: { type: "string" } }
+      },
+      required: ["emails"]
     }
   },
   {
@@ -1385,7 +1531,12 @@ export const MCP_TOOLS = [
       properties: {
         from: {
           type: "string",
-          description: "Sender, e.g. 'Acme <hello@acme.com>'. Must use a verified domain."
+          description:
+            "Sender, e.g. 'Acme <hello@acme.com>'. Must use a verified domain. Provide this OR sender_id, not both."
+        },
+        sender_id: {
+          type: "string",
+          description: "Send as a named sender (alternative to from)."
         },
         to: {
           type: ["string", "array"],
@@ -1440,7 +1591,9 @@ export const MCP_TOOLS = [
           }
         }
       },
-      required: ["from", "to", "subject"]
+      // Exactly one of from / sender_id is required; enforced in runTool since
+      // JSON Schema `required` can't express "exactly one of".
+      required: ["to", "subject"]
     }
   },
   {
@@ -2055,7 +2208,12 @@ export const MCP_TOOLS = [
       properties: {
         publicationId: { type: "string" },
         name: { type: "string" },
-        default_subscription: { type: "string", enum: ["opt_in", "opt_out"] },
+        default_subscription: {
+          type: "string",
+          enum: ["opt_in", "opt_out"],
+          description:
+            "opt_out = subscribed by default (recipients may opt out); opt_in = only explicitly opted-in recipients receive it."
+        },
         description: { type: "string" },
         visibility: { type: "string", enum: ["public", "private"] }
       },
@@ -2084,7 +2242,12 @@ export const MCP_TOOLS = [
         tagId: { type: "string" },
         name: { type: "string" },
         description: { type: "string" },
-        default_subscription: { type: "string", enum: ["opt_in", "opt_out"] },
+        default_subscription: {
+          type: "string",
+          enum: ["opt_in", "opt_out"],
+          description:
+            "opt_out = subscribed by default (recipients may opt out); opt_in = only explicitly opted-in recipients receive it."
+        },
         visibility: { type: "string", enum: ["public", "private"] }
       },
       required: ["publicationId", "tagId"]
@@ -2591,6 +2754,7 @@ async function callRestApi<T>(
 /** Fields forwarded verbatim from email.send args to POST /v1/emails. */
 const EMAIL_SEND_FIELDS = [
   "from",
+  "sender_id",
   "to",
   "subject",
   "html",
@@ -2900,6 +3064,153 @@ async function runTool(
       `Generated Traefik preview for ${publicationId} (${preview.entries.length} domains)`,
       preview
     );
+  }
+
+  if (toolName === "sender.list") {
+    const publicationId = readRequiredString(args, "publicationId");
+    const requestedLimit = readOptionalNumber(args, "limit");
+    const limit = Math.max(1, Math.min(100, Math.trunc(requestedLimit ?? 100)));
+
+    const senders = await callTrpc<SenderRecord[]>(
+      "publication.senderList",
+      { publicationId, limit },
+      options,
+      "query"
+    );
+
+    return makeToolResult(
+      senders.length === 0
+        ? `No senders configured for ${publicationId}`
+        : `Loaded ${senders.length} sender(s) for ${publicationId}`,
+      { publicationId, senders }
+    );
+  }
+
+  if (toolName === "sender.create") {
+    const publicationId = readRequiredString(args, "publicationId");
+    const name = readRequiredString(args, "name");
+    const email = readRequiredString(args, "email");
+    const replyTo = asOptionalString(args.replyTo);
+    const isDefault = readOptionalBoolean(args, "isDefault");
+
+    const result = await callTrpc<SenderMutationResult>(
+      "publication.senderCreate",
+      {
+        publicationId,
+        name,
+        email,
+        ...(replyTo ? { replyTo } : {}),
+        ...(typeof isDefault === "boolean" ? { isDefault } : {})
+      },
+      options
+    );
+
+    return makeToolResult(
+      `Sender created: ${result.sender?.name} <${result.sender?.email}>`,
+      result
+    );
+  }
+
+  if (toolName === "sender.update") {
+    const publicationId = readRequiredString(args, "publicationId");
+    const senderId = readRequiredString(args, "senderId");
+    const name = asOptionalString(args.name);
+    const replyTo = asOptionalString(args.replyTo);
+    const isDefault = readOptionalBoolean(args, "isDefault");
+
+    const result = await callTrpc<SenderMutationResult>(
+      "publication.senderUpdate",
+      {
+        publicationId,
+        senderId,
+        ...(name ? { name } : {}),
+        ...(replyTo !== undefined ? { replyTo } : {}),
+        ...(typeof isDefault === "boolean" ? { isDefault } : {})
+      },
+      options
+    );
+
+    return makeToolResult(`Sender updated: ${result.sender?.email ?? senderId}`, result);
+  }
+
+  if (toolName === "sender.set_default") {
+    const publicationId = readRequiredString(args, "publicationId");
+    const senderId = readRequiredString(args, "senderId");
+
+    const result = await callTrpc<SenderMutationResult>(
+      "publication.senderSetDefault",
+      { publicationId, senderId },
+      options
+    );
+
+    return makeToolResult(`Default sender set: ${result.sender?.email ?? senderId}`, result);
+  }
+
+  if (toolName === "sender.delete") {
+    const publicationId = readRequiredString(args, "publicationId");
+    const senderId = readRequiredString(args, "senderId");
+
+    const result = await callTrpc<SenderRemoveResult>(
+      "publication.senderDelete",
+      { publicationId, senderId },
+      options
+    );
+
+    return makeToolResult(`Sender removed: ${result.senderId}`, result);
+  }
+
+  if (toolName === "suppression.search") {
+    const reason = asOptionalString(args.reason);
+    const query = asOptionalString(args.query);
+    const requestedLimit = readOptionalNumber(args, "limit");
+    const limit = Math.max(1, Math.min(100, Math.trunc(requestedLimit ?? 20)));
+
+    const result = await callTrpc<SuppressionSearchResult>(
+      "org.suppressionSearch",
+      {
+        ...(reason ? { reason } : {}),
+        ...(query ? { search: query } : {}),
+        limit
+      },
+      options,
+      "query"
+    );
+
+    return makeToolResult(
+      result.entries.length === 0
+        ? "No suppression entries matched"
+        : `Loaded ${result.entries.length} suppression entr${result.entries.length === 1 ? "y" : "ies"}`,
+      result
+    );
+  }
+
+  if (toolName === "suppression.add") {
+    const emails = Array.isArray(args.emails)
+      ? args.emails.filter((email): email is string => typeof email === "string")
+      : [];
+    const reason = asOptionalString(args.reason);
+
+    const result = await callTrpc<{ added: number }>(
+      "org.suppressionAdd",
+      { emails, ...(reason ? { reason } : {}) },
+      options
+    );
+
+    return makeToolResult(`Added ${result.added} suppression entr${result.added === 1 ? "y" : "ies"}`, result);
+  }
+
+  if (toolName === "suppression.remove") {
+    const emails = Array.isArray(args.emails)
+      ? args.emails.filter((email): email is string => typeof email === "string")
+      : [];
+
+    const result = await callTrpc<{ removed: number }>(
+      "org.suppressionRemove",
+      { emails },
+      options
+    );
+
+    return makeToolResult(`Removed ${result.removed} suppression entr${result.removed === 1 ? "y" : "ies"}`, result);
   }
 
   if (toolName === "contact.list") {
@@ -3973,10 +4284,16 @@ async function runTool(
     for (const key of EMAIL_SEND_FIELDS) {
       if (args[key] !== undefined) body[key] = args[key];
     }
-    for (const required of ["from", "to", "subject"] as const) {
+    for (const required of ["to", "subject"] as const) {
       if (body[required] === undefined) {
         throw new Error(`Missing required field: ${required}`);
       }
+    }
+    // Exactly one of from / sender_id (mirrors sendEmailSchema's refine in
+    // packages/contracts). Caught here so an agent gets a clear message before
+    // the round-trip instead of a generic 400 from the REST endpoint.
+    if ((body.from === undefined) === (body.sender_id === undefined)) {
+      throw new Error("Provide exactly one of 'from' or 'sender_id'.");
     }
 
     const result = await callRestApi<{ id: string }>(
