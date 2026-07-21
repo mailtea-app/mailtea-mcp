@@ -369,19 +369,19 @@ type SenderRemoveResult = {
   senderId: string;
 };
 
-type SuppressionEntryRecord = {
-  id: string;
-  email: string;
-  reason: string;
-  source: string;
-  publicationId: string | null;
-  createdAt: string;
-};
-
-type SuppressionSearchResult = {
-  entries: SuppressionEntryRecord[];
-  hasMore: boolean;
-  nextCursor: string | null;
+type SuppressionListResponse = {
+  object: "list";
+  data: Array<{
+    object: "suppression";
+    id: string;
+    email: string;
+    reason: string;
+    source: string;
+    publication_id: string | null;
+    created_at: string;
+  }>;
+  has_more: boolean;
+  next_cursor?: string;
 };
 
 type PublicationWorkspaceRecord = {
@@ -704,7 +704,7 @@ export const MCP_TOOLS = [
   {
     name: "suppression.search",
     description:
-      "Search the organization's suppression list (addresses that will never be emailed). Filter by reason or email substring.",
+      "Search the organization's suppression list (addresses that will never be emailed). Filter by reason, email substring, or creation-date window; paginate with starting_after.",
     inputSchema: {
       type: "object",
       properties: {
@@ -713,8 +713,29 @@ export const MCP_TOOLS = [
           enum: ["bounced", "complained", "manual", "unsubscribed", "invalid", "unknown"]
         },
         query: { type: "string", description: "Email substring to match." },
+        created_after: {
+          type: "string",
+          description: "ISO 8601 datetime; only entries created at or after this time."
+        },
+        created_before: {
+          type: "string",
+          description: "ISO 8601 datetime; only entries created before this time."
+        },
+        starting_after: {
+          type: "string",
+          description: "Pagination cursor from a previous response's next_cursor."
+        },
         limit: { type: "number" }
       }
+    }
+  },
+  {
+    name: "suppression.export",
+    description:
+      "Export the organization's entire suppression list as CSV (columns: email, reason, source, created_at). Returns the CSV text in 'csv'.",
+    inputSchema: {
+      type: "object",
+      properties: {}
     }
   },
   {
@@ -1406,7 +1427,10 @@ export const MCP_TOOLS = [
           required: ["root", "elements"]
         },
         description: { type: "string", description: "Template description (max 500 chars)" },
+        text: { type: "string", description: "Plain-text body." },
         subject: { type: "string", description: "Default email subject line" },
+        from: { type: "string", description: "Default sender address." },
+        reply_to: { type: "string" },
         variables: {
           type: "array",
           description: "Template variables with fallback values",
@@ -1520,6 +1544,27 @@ export const MCP_TOOLS = [
         templateId: { type: "string" }
       },
       required: ["publicationId", "templateId"]
+    }
+  },
+  {
+    name: "template.render",
+    description:
+      "Render a json-render spec to email-safe HTML and plain text without creating a template — a dry run for previewing a spec before template.create. Returns { html, text }. Available spec components: Html, Head, Body, Container, Section, Row, Column, Heading, Text, Link, Button, Image, Hr, Preview, Markdown, MailteaHeader, MailteaFooter, MailteaSpacer, MailteaContentBlock.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        spec: {
+          type: "object",
+          description: "json-render spec (flat element map).",
+          properties: { root: { type: "string" }, elements: { type: "object" } },
+          required: ["root", "elements"]
+        },
+        variables: {
+          type: "object",
+          description: "Optional variable values to substitute during render."
+        }
+      },
+      required: ["spec"]
     }
   },
   {
@@ -1801,7 +1846,7 @@ export const MCP_TOOLS = [
   {
     name: "domain.create",
     description:
-      "Register an email sending domain for a publication. Returns the DNS TXT record (in 'records') the operator must add before the domain can be verified. Set purpose to 'email' (or 'both') to use it as a sending 'from' domain.",
+      "Register an email sending domain for a publication. Returns the DNS records (in 'records') the operator must add — an ownership TXT record, a branded DKIM TXT record, and (for email domains) a receiving MX record. Set purpose to 'email' (or 'both') to use it as a sending 'from' domain; both the ownership TXT and the DKIM TXT must verify before the domain can send.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1844,7 +1889,7 @@ export const MCP_TOOLS = [
   {
     name: "domain.verify",
     description:
-      "Verify a domain by checking its DNS TXT record. On success the domain's status becomes 'verified' and it can be used as a sending 'from' domain.",
+      "Check a domain's DNS and report its verification state. Sending is gated on two parts: the ownership TXT record must verify (which sets status to 'verified') AND the branded DKIM TXT record must verify. Ownership verification alone does NOT make a domain sendable. The response now includes 'dkim_status' and 'receiving_mx_found' so you can confirm both before sending.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1951,7 +1996,7 @@ export const MCP_TOOLS = [
           type: "array",
           items: { type: "string" },
           description:
-            "Event types, e.g. email.received, email.sent, email.delivered, email.bounced, email.opened, email.clicked, contact.created, contact.unsubscribed."
+            "Event types to subscribe to. One or more of: email.received, email.sent, email.delivered, email.delivery_delayed, email.bounced, email.complained, email.opened, email.clicked, email.failed, email.suppressed, contact.created, contact.updated, contact.deleted, contact.unsubscribed."
         }
       },
       required: ["publicationId", "endpoint", "events"]
@@ -2761,6 +2806,42 @@ async function callRestApi<T>(
   return payload as T;
 }
 
+// REST endpoints that respond with text/csv (e.g. /v1/suppressions/export) can't
+// go through callRestApi, which parses JSON. Return the raw body instead.
+async function callRestApiText(
+  method: "GET" | "POST" | "PATCH" | "DELETE",
+  path: string,
+  options: McpRuntimeOptions
+): Promise<string> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const apiBaseUrl = resolveApiBaseUrl(options);
+  const token = resolveToken(options);
+
+  if (!token) {
+    throw new Error("Missing API token.");
+  }
+
+  const httpResponse = await fetchImpl(`${apiBaseUrl}${path}`, {
+    method,
+    headers: { authorization: `Bearer ${token}` }
+  });
+  const text = await httpResponse.text().catch(() => "");
+
+  if (!httpResponse.ok) {
+    // Error responses are JSON; surface the `error` field when present.
+    let message = text || `${httpResponse.status} ${httpResponse.statusText}`;
+    try {
+      const parsed = JSON.parse(text) as { error?: string };
+      if (parsed?.error) message = parsed.error;
+    } catch {
+      // Non-JSON body — keep the raw text.
+    }
+    throw new Error(message);
+  }
+
+  return text;
+}
+
 /** Fields forwarded verbatim from email.send args to POST /v1/emails. */
 const EMAIL_SEND_FIELDS = [
   "from",
@@ -3170,27 +3251,48 @@ async function runTool(
   }
 
   if (toolName === "suppression.search") {
+    // Re-backed onto REST GET /v1/suppressions so the REST-only filters
+    // (created_after / created_before / starting_after) are reachable. The
+    // legacy `query` arg maps to the REST `q` param for backward compatibility.
     const reason = asOptionalString(args.reason);
     const query = asOptionalString(args.query);
+    const createdAfter = asOptionalString(args.created_after);
+    const createdBefore = asOptionalString(args.created_before);
+    const startingAfter = asOptionalString(args.starting_after);
     const requestedLimit = readOptionalNumber(args, "limit");
     const limit = Math.max(1, Math.min(100, Math.trunc(requestedLimit ?? 20)));
 
-    const result = await callTrpc<SuppressionSearchResult>(
-      "org.suppressionSearch",
-      {
-        ...(reason ? { reason } : {}),
-        ...(query ? { search: query } : {}),
-        limit
-      },
-      options,
-      "query"
+    const params = new URLSearchParams();
+    if (reason) params.set("reason", reason);
+    if (query) params.set("q", query);
+    if (createdAfter) params.set("created_after", createdAfter);
+    if (createdBefore) params.set("created_before", createdBefore);
+    if (startingAfter) params.set("starting_after", startingAfter);
+    params.set("limit", String(limit));
+
+    const result = await callRestApi<SuppressionListResponse>(
+      "GET",
+      `/v1/suppressions?${params.toString()}`,
+      undefined,
+      options
     );
 
     return makeToolResult(
-      result.entries.length === 0
+      result.data.length === 0
         ? "No suppression entries matched"
-        : `Loaded ${result.entries.length} suppression entr${result.entries.length === 1 ? "y" : "ies"}`,
+        : `Loaded ${result.data.length} suppression entr${result.data.length === 1 ? "y" : "ies"}`,
       result
+    );
+  }
+
+  if (toolName === "suppression.export") {
+    const csv = await callRestApiText("GET", "/v1/suppressions/export", options);
+    // Data rows only: drop the header line and any trailing blank line.
+    const rowCount = Math.max(0, csv.split("\n").filter((line) => line.length > 0).length - 1);
+
+    return makeToolResult(
+      `Suppression list exported: ${rowCount} entr${rowCount === 1 ? "y" : "ies"}`,
+      { csv, filename: "suppressions.csv", rowCount }
     );
   }
 
@@ -4142,7 +4244,10 @@ async function runTool(
     const html = asOptionalString(args.html);
     const spec = args.spec as Record<string, unknown> | undefined;
     const description = asOptionalString(args.description);
+    const text = asOptionalString(args.text);
     const subject = asOptionalString(args.subject);
+    const from = asOptionalString(args.from);
+    const replyTo = asOptionalString(args.reply_to);
     const variables = args.variables as Array<{ key: string; type: string; fallback_value?: unknown }> | undefined;
 
     if (!html && !spec) {
@@ -4155,7 +4260,10 @@ async function runTool(
       ...(html ? { html } : {}),
       ...(spec ? { spec } : {}),
       ...(description ? { description } : {}),
+      ...(text ? { text } : {}),
       ...(subject ? { subject } : {}),
+      ...(from ? { from } : {}),
+      ...(replyTo ? { reply_to: replyTo } : {}),
       ...(variables ? { variables } : {})
     };
 
@@ -4284,6 +4392,28 @@ async function runTool(
     );
 
     return makeToolResult(`Template deleted: ${result.id}`, result);
+  }
+
+  if (toolName === "template.render") {
+    const spec = args.spec as Record<string, unknown> | undefined;
+    if (!spec) {
+      throw new Error("'spec' is required");
+    }
+    const variables = args.variables as Record<string, unknown> | undefined;
+
+    const body: Record<string, unknown> = {
+      spec,
+      ...(variables ? { variables } : {})
+    };
+
+    const rendered = await callRestApi<{ html: string; text: string }>(
+      "POST",
+      "/v1/templates/render",
+      body,
+      options
+    );
+
+    return makeToolResult("Template spec rendered", rendered);
   }
 
   if (toolName === "email.send") {

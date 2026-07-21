@@ -78,6 +78,8 @@ test("tools/list includes reusable section MCP tools", async () => {
   assert.ok(toolNames.includes("analytics.issue_export_csv"));
   assert.ok(toolNames.includes("analytics.issue_export_performance_csv"));
   assert.ok(toolNames.includes("analytics.issue_export_polls_csv"));
+  assert.ok(toolNames.includes("template.render"));
+  assert.ok(toolNames.includes("suppression.export"));
 });
 
 test("issue.delivery_progress calls query endpoint", async () => {
@@ -3340,6 +3342,145 @@ test("template.delete DELETEs /v1/templates/:id", async () => {
   assert.equal(url.pathname, "/v1/templates/tmpl_1");
   assert.equal(url.searchParams.get("publication_id"), "pub_1");
   assert.equal(calls[0]!.init?.method, "DELETE");
+});
+
+test("template.create forwards text/from/reply_to alongside html", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return restOk({ id: "tmpl_1", format: "html" });
+  };
+  await callTool(
+    "template.create",
+    {
+      publicationId: "pub_1",
+      name: "T",
+      html: "<p>x</p>",
+      text: "x",
+      from: "Acme <hello@acme.com>",
+      reply_to: "support@acme.com"
+    },
+    fetchImpl
+  );
+  assert.equal(new URL(calls[0]!.url).pathname, "/v1/templates");
+  assert.equal(calls[0]!.init?.method, "POST");
+  assert.deepEqual(JSON.parse(String(calls[0]!.init?.body)), {
+    publication_id: "pub_1",
+    name: "T",
+    html: "<p>x</p>",
+    text: "x",
+    from: "Acme <hello@acme.com>",
+    reply_to: "support@acme.com"
+  });
+});
+
+test("template.render POSTs /v1/templates/render with spec and variables", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return restOk({ html: "<p>Hello</p>", text: "Hello" });
+  };
+  const spec = { root: "body", elements: { body: { type: "Body" } } };
+  const response = await callTool(
+    "template.render",
+    { spec, variables: { name: "Ada" } },
+    fetchImpl
+  );
+  const url = new URL(calls[0]!.url);
+  assert.equal(url.pathname, "/v1/templates/render");
+  assert.equal(calls[0]!.init?.method, "POST");
+  assert.deepEqual(JSON.parse(String(calls[0]!.init?.body)), {
+    spec,
+    variables: { name: "Ada" }
+  });
+
+  const result = readJsonRpcResult(response);
+  const content = result.content as Array<{ type: string; text: string }>;
+  assert.equal(content[0]?.text, "Template spec rendered");
+  const structured = result.structuredContent as { html: string; text: string };
+  assert.equal(structured.html, "<p>Hello</p>");
+  assert.equal(structured.text, "Hello");
+});
+
+test("suppression.search GETs /v1/suppressions mapping query->q and the date/cursor filters", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return restOk({
+      object: "list",
+      data: [
+        {
+          object: "suppression",
+          id: "sup_1",
+          email: "bounced@example.com",
+          reason: "bounced",
+          source: "system",
+          publication_id: null,
+          created_at: "2026-02-20T01:00:00.000Z"
+        }
+      ],
+      has_more: false
+    });
+  };
+  const response = await callTool(
+    "suppression.search",
+    {
+      reason: "bounced",
+      query: "bounced",
+      created_after: "2026-02-01T00:00:00.000Z",
+      created_before: "2026-03-01T00:00:00.000Z",
+      starting_after: "cursor_abc",
+      limit: 50
+    },
+    fetchImpl
+  );
+  const url = new URL(calls[0]!.url);
+  assert.equal(url.pathname, "/v1/suppressions");
+  assert.equal(calls[0]!.init?.method, "GET");
+  assert.equal(url.searchParams.get("reason"), "bounced");
+  assert.equal(url.searchParams.get("q"), "bounced");
+  assert.equal(url.searchParams.get("created_after"), "2026-02-01T00:00:00.000Z");
+  assert.equal(url.searchParams.get("created_before"), "2026-03-01T00:00:00.000Z");
+  assert.equal(url.searchParams.get("starting_after"), "cursor_abc");
+  assert.equal(url.searchParams.get("limit"), "50");
+
+  const result = readJsonRpcResult(response);
+  const content = result.content as Array<{ type: string; text: string }>;
+  assert.equal(content[0]?.text, "Loaded 1 suppression entry");
+  const structured = result.structuredContent as { data: unknown[]; has_more: boolean };
+  assert.equal(structured.data.length, 1);
+  assert.equal(structured.has_more, false);
+});
+
+test("suppression.export GETs /v1/suppressions/export and returns the CSV text", async () => {
+  const calls: FetchCall[] = [];
+  const csv =
+    "email,reason,source,created_at\n" +
+    "a@example.com,bounced,system,2026-02-20T01:00:00.000Z\n" +
+    "b@example.com,manual,api,2026-02-21T01:00:00.000Z\n";
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(csv, {
+      status: 200,
+      headers: { "content-type": "text/csv; charset=utf-8" }
+    });
+  };
+  const response = await callTool("suppression.export", {}, fetchImpl);
+  const url = new URL(calls[0]!.url);
+  assert.equal(url.pathname, "/v1/suppressions/export");
+  assert.equal(calls[0]!.init?.method, "GET");
+
+  const result = readJsonRpcResult(response);
+  const content = result.content as Array<{ type: string; text: string }>;
+  assert.equal(content[0]?.text, "Suppression list exported: 2 entries");
+  const structured = result.structuredContent as {
+    csv: string;
+    filename: string;
+    rowCount: number;
+  };
+  assert.equal(structured.csv, csv);
+  assert.equal(structured.filename, "suppressions.csv");
+  assert.equal(structured.rowCount, 2);
 });
 
 test("email.resend POSTs the tRPC mutation /trpc/email.resend with {id}", async () => {
