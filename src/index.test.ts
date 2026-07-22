@@ -3080,7 +3080,10 @@ test("email.list GETs /v1/emails with status + pagination filters", async () => 
       jsonrpc: "2.0",
       id: 6,
       method: "tools/call",
-      params: { name: "email.list", arguments: { status: "sent", limit: 10, tag_name: "campaign" } }
+      params: {
+        name: "email.list",
+        arguments: { status: "sent", limit: 10, tag_name: "campaign", search: "admin@somi.ai" }
+      }
     },
     { apiBaseUrl: "http://localhost:8787", token: "pat_test_token", fetchImpl }
   );
@@ -3092,6 +3095,7 @@ test("email.list GETs /v1/emails with status + pagination filters", async () => 
   assert.equal(url.searchParams.get("status"), "sent");
   assert.equal(url.searchParams.get("limit"), "10");
   assert.equal(url.searchParams.get("tag_name"), "campaign");
+  assert.equal(url.searchParams.get("search"), "admin@somi.ai");
 
   const result = readJsonRpcResult(response);
   const content = result.content as Array<{ type: string; text: string }>;

@@ -1702,7 +1702,7 @@ export const MCP_TOOLS = [
   {
     name: "email.list",
     description:
-      "List transactional emails (most recent first). Filter by status and tags; paginate with limit/offset. Returns id, status, subject, recipient per email.",
+      "List transactional emails (most recent first). Filter by status, tags, or a search substring over recipient/sender/subject; paginate with limit/offset. Returns id, status, subject, recipient per email.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1724,6 +1724,7 @@ export const MCP_TOOLS = [
         offset: { type: "number", description: "Pagination offset (default 0)." },
         tag_name: { type: "string", description: "Filter by a custom tag name." },
         tag_value: { type: "string", description: "Filter by a custom tag value (use with tag_name)." },
+        search: { type: "string", description: "Case-insensitive substring match on recipient, sender, or subject." },
         from_date: { type: "string", description: "ISO 8601 lower bound on created_at." },
         to_date: { type: "string", description: "ISO 8601 upper bound on created_at." }
       }
@@ -4530,7 +4531,7 @@ async function runTool(
     const offset = readOptionalNumber(args, "offset");
     if (limit !== undefined) params.set("limit", String(limit));
     if (offset !== undefined) params.set("offset", String(offset));
-    for (const key of ["status", "tag_name", "tag_value", "from_date", "to_date"] as const) {
+    for (const key of ["status", "tag_name", "tag_value", "search", "from_date", "to_date"] as const) {
       const value = asOptionalString(args[key]);
       if (value) params.set(key, value);
     }
