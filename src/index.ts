@@ -449,6 +449,349 @@ type TrpcProcedureType = "query" | "mutation";
 // Self-hosters and local dev override via MAILTEA_API_BASE_URL.
 const DEFAULT_API_BASE_URL = "https://api.mailtea.app";
 
+// --- Automations -----------------------------------------------------------
+// The automation/event tools take snake_case arguments (publication_id,
+// automation_id, …) rather than the camelCase used by every other tool here.
+// The graph is forwarded to the REST API verbatim and its own keys are
+// snake_case, so mixing the two casings inside one payload is a trap.
+
+/** Required/optional `config` keys per step type. Inlined into tool descriptions. */
+const AUTOMATION_STEP_CONFIG_HELP =
+  "Step config by type — trigger: {trigger_type, trigger_key?, filter?}; delay: {duration, unit} (unit: seconds|minutes|hours|days|weeks, max 365 days); condition: {rule}; wait_for_event: {event_name, timeout_seconds, filter?} (max 90 days); send_email: {template_id, sender_id?, subject?, reply_to?, variables?}; tag_add: {tag_id}; tag_remove: {tag_id}; contact_update: {properties}; http_request: {url, method?, headers?, body?, timeout_seconds?}; exit: {reason?}.";
+
+/** Trigger catalog, inlined into the graph-authoring tool descriptions. */
+const AUTOMATION_TRIGGER_HELP =
+  "Trigger types: contact.created, contact.subscribed, contact.unsubscribed, tag.subscribed, tag.unsubscribed, event, email.opened, email.clicked, email.received — tag.subscribed and tag.unsubscribed take trigger_key = tag id, event takes trigger_key = event name.";
+
+// Two resources, because they answer different questions and an agent pointed at
+// only the first has to guess the rule node shape — it lives exclusively in the
+// second.
+const AUTOMATION_CATALOG_HELP =
+  "Two machine-readable resources back these tools: mailtea://automations/step-types is the catalog of trigger types, step types, config shapes, branch labels, limits and validation codes; mailtea://automations/condition-fields is the rule DSL a condition step's config.rule and any filter must follow — operators, addressable field namespaces, value references and the rule node shapes themselves. Read both before authoring a branching graph.";
+
+const AUTOMATION_SNAKE_CASE_HELP =
+  "Arguments are snake_case — a deliberate deviation from the camelCase used by other Mailtea MCP tools, because the graph is forwarded to the REST API verbatim.";
+
+/**
+ * The `schema_json` grammar, inlined into both event_definition write tools and
+ * served in the condition-fields resource. It mirrors `EventSchemaDocument` and
+ * `validateEventSchemaDocument` in `@mailtea/contracts`, which reject every key
+ * outside this vocabulary — so an agent that reaches for JSON Schema by reflex
+ * gets a 400, and the description is the only place it can learn otherwise.
+ */
+const EVENT_SCHEMA_DOCUMENT_HELP = `schema_json is a Mailtea event schema document, NOT JSON Schema: the reflex attempt {"type": "object", "properties": {...}, "required": [...]} is refused with invalid_event_schema (Unknown schema key "type", Unknown schema key "required") — "type" and "required" belong on each PROPERTY, never at the top level. The only top-level keys are "properties" (an object keyed by property name, max 200) and "additional_properties" (boolean, DEFAULT TRUE — a schema documents what it knows about without closing the payload; set it false to reject undeclared keys). Each declared property accepts only {type?, required?, description?}: "type" is one of string, number, boolean, object, array, null — or an ARRAY of those, the same shape event_definition.get returns in inferred_properties; "required" is a boolean; "description" is a string. Example: {"properties": {"plan": {"type": "string", "required": true, "description": "Plan the contact bought"}, "seats": {"type": ["number", "null"]}}, "additional_properties": false}.`;
+
+// `config` is deliberately a flat `{ type: "object" }` rather than a discriminated
+// oneOf: MCP clients vary in how much JSON Schema they honour, and unions are
+// exactly where they break. The per-type shape lives in the description instead.
+const AUTOMATION_STEPS_SCHEMA = {
+  type: "array",
+  description: `Ordered list of steps. Exactly one step must have type "trigger". Max 100 steps. ${AUTOMATION_STEP_CONFIG_HELP}`,
+  items: {
+    type: "object",
+    properties: {
+      key: {
+        type: "string",
+        description: `Stable step key, pattern ^[a-z0-9_-]{1,64}$. "__proto__", "constructor" and "prototype" are reserved and refused. Renaming a key orphans that step's metrics history.`
+      },
+      type: {
+        type: "string",
+        enum: [
+          "trigger",
+          "delay",
+          "condition",
+          "wait_for_event",
+          "send_email",
+          "tag_add",
+          "tag_remove",
+          "contact_update",
+          "http_request",
+          "exit"
+        ]
+      },
+      label: { type: "string", description: "Optional display label (max 80 chars)." },
+      config: {
+        type: "object",
+        description: AUTOMATION_STEP_CONFIG_HELP
+      }
+    },
+    required: ["key", "type"]
+  }
+} as const;
+
+const AUTOMATION_CONNECTIONS_SCHEMA = {
+  type: "array",
+  description: `Optional. Omit it and the server links "steps" in array order with branch "next", rooted at the trigger wherever it sits. It is REQUIRED when any step is a "condition" or "wait_for_event" — omitting it there fails with connections_required_for_branching. Max 200 connections.`,
+  items: {
+    type: "object",
+    properties: {
+      from: { type: "string", description: "Source step key." },
+      to: { type: "string", description: "Target step key." },
+      branch: {
+        type: "string",
+        enum: ["next", "condition_met", "condition_not_met", "event_received", "timeout"],
+        description: `Branch label leaving "from". Defaults to "next". condition emits condition_met/condition_not_met, wait_for_event emits event_received/timeout, every other step emits next, and exit is terminal.`
+      }
+    },
+    required: ["from", "to"]
+  }
+} as const;
+
+const AUTOMATION_VALIDATE_ONLY_SCHEMA = {
+  type: "boolean",
+  description:
+    "Dry run (default false). Writes nothing and returns the SAME structured issues[] a real failure returns, so you can self-correct before committing.",
+  default: false
+} as const;
+
+/**
+ * Machine-readable automation catalog served at `mailtea://automations/step-types`.
+ * Values are literals rather than imports because `packages/mcp` deliberately
+ * takes no runtime dependency on `@mailtea/contracts` — they mirror
+ * `AUTOMATION_TRIGGER_TYPES`, `STEP_CONFIG_FIELDS`, `AUTOMATION_VALIDATION_CODES`
+ * and `RULE_OPERATORS` and must be updated in lockstep with them.
+ */
+const AUTOMATION_STEP_TYPE_CATALOG = {
+  trigger_types: [
+    {
+      type: "contact.created",
+      requires_trigger_key: false,
+      description: "A contact record is created in the publication."
+    },
+    {
+      type: "contact.subscribed",
+      requires_trigger_key: false,
+      description: "A contact becomes subscribed."
+    },
+    {
+      type: "contact.unsubscribed",
+      requires_trigger_key: false,
+      description: "A contact unsubscribes."
+    },
+    {
+      type: "tag.subscribed",
+      requires_trigger_key: true,
+      description: "A tag is added to a contact. trigger_key is the tag id."
+    },
+    {
+      type: "tag.unsubscribed",
+      requires_trigger_key: true,
+      description: "A tag is removed from a contact. trigger_key is the tag id."
+    },
+    {
+      type: "event",
+      requires_trigger_key: true,
+      description:
+        "A custom event is ingested via POST /v1/events (event.send). trigger_key is the event name."
+    },
+    {
+      type: "email.opened",
+      requires_trigger_key: false,
+      description: "A recipient opens an email."
+    },
+    {
+      type: "email.clicked",
+      requires_trigger_key: false,
+      description:
+        "A recipient clicks a link. event.link is recipient-supplied — never render it as trusted HTML."
+    },
+    {
+      type: "email.received",
+      requires_trigger_key: false,
+      description: "An inbound email is received for the publication."
+    }
+  ],
+  step_types: [
+    {
+      type: "trigger",
+      config: { required: ["trigger_type"], optional: ["trigger_key", "filter"] },
+      branches: ["next"],
+      side_effecting: false,
+      description: "Entry point. Exactly one per graph, and nothing may connect into it."
+    },
+    {
+      type: "delay",
+      config: { required: ["duration", "unit"], optional: [] },
+      branches: ["next"],
+      side_effecting: false,
+      description:
+        "Wait for a relative duration. unit is seconds|minutes|hours|days|weeks; total must be <= 365 days. Time-of-day and timezone keys are refused with not_yet_supported."
+    },
+    {
+      type: "condition",
+      config: { required: ["rule"], optional: [] },
+      branches: ["condition_met", "condition_not_met"],
+      side_effecting: false,
+      description:
+        "Branch on a rule tree. Requires explicit connections; branches never rejoin."
+    },
+    {
+      type: "wait_for_event",
+      config: { required: ["event_name", "timeout_seconds"], optional: ["filter"] },
+      branches: ["event_received", "timeout"],
+      side_effecting: false,
+      description:
+        "Pause until a matching event arrives or the timeout elapses (<= 90 days). BOTH branches are required — a missing timeout branch strands the contact."
+    },
+    {
+      type: "send_email",
+      config: {
+        required: ["template_id"],
+        optional: ["sender_id", "subject", "reply_to", "variables"]
+      },
+      branches: ["next"],
+      side_effecting: true,
+      description:
+        "Send a published server template. Unresolvable variables fall back to the template's fallback_value, or an empty string when none is declared."
+    },
+    {
+      type: "tag_add",
+      config: { required: ["tag_id"], optional: [] },
+      branches: ["next"],
+      side_effecting: true,
+      description: "Add a tag to the enrolled contact."
+    },
+    {
+      type: "tag_remove",
+      config: { required: ["tag_id"], optional: [] },
+      branches: ["next"],
+      side_effecting: true,
+      description: "Remove a tag from the enrolled contact."
+    },
+    {
+      type: "contact_update",
+      config: { required: ["properties"], optional: [] },
+      branches: ["next"],
+      side_effecting: true,
+      description: "Merge properties onto the enrolled contact."
+    },
+    {
+      type: "http_request",
+      config: {
+        required: ["url"],
+        optional: ["method", "headers", "body", "timeout_seconds"]
+      },
+      branches: ["next"],
+      side_effecting: true,
+      description:
+        "Call an external endpoint. timeout_seconds <= 30 (default 10), <= 20 headers, <= 4 KB of headers, <= 64 KB body, 8 KB of the response captured. http:// URLs are refused when deployed (insecure_http_url)."
+    },
+    {
+      type: "exit",
+      config: { required: [], optional: ["reason"] },
+      branches: [],
+      side_effecting: false,
+      description: "Terminal step. Ends the run; nothing may leave it."
+    }
+  ],
+  branches: ["next", "condition_met", "condition_not_met", "event_received", "timeout"],
+  limits: {
+    max_steps: 100,
+    max_connections: 200,
+    max_delay_seconds: 31536000,
+    max_wait_timeout_seconds: 7776000,
+    max_step_label_length: 80,
+    step_key_pattern: "^[a-z0-9_-]{1,64}$",
+    reserved_step_keys: ["__proto__", "constructor", "prototype"],
+    event_name_pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+  },
+  condition: {
+    operators: [
+      "eq",
+      "neq",
+      "gt",
+      "gte",
+      "lt",
+      "lte",
+      "contains",
+      "starts_with",
+      "ends_with",
+      "exists",
+      "is_empty",
+      "in",
+      "not_in"
+    ],
+    presence_operators: ["exists", "is_empty"],
+    set_operators: ["in", "not_in"],
+    context_roots: ["contact", "event", "steps"],
+    known_fields: [
+      "contact.email",
+      "contact.status",
+      "contact.created_at",
+      "contact.unsubscribed_at",
+      "contact.tags",
+      "event.name",
+      "event.occurred_at"
+    ],
+    open_namespaces: ["contact.properties.*", "event.properties.*", "steps.<step_key>.*"],
+    max_depth: 10,
+    value_refs: `Rule values may be {"var": "<path>"} for field-to-field comparison`
+  },
+  validation_codes: [
+    "invalid_graph",
+    "empty_graph",
+    "missing_trigger",
+    "multiple_triggers",
+    "trigger_has_inbound",
+    "invalid_step",
+    "invalid_step_key",
+    "duplicate_step_key",
+    "unknown_step_type",
+    "invalid_step_label",
+    "duplicate_step_label",
+    "too_many_steps",
+    "too_many_connections",
+    "invalid_connection",
+    "unknown_step_ref",
+    "self_connection",
+    "unknown_branch",
+    "branch_not_allowed",
+    "duplicate_branch",
+    "duplicate_connection",
+    "terminal_step_has_outbound",
+    "branch_rejoin",
+    "cycle_detected",
+    "unreachable_step",
+    "missing_branch",
+    "empty_branch",
+    "unconfigured_step",
+    "invalid_step_config",
+    "unknown_config_field",
+    "event_name_unverified",
+    "not_yet_supported",
+    "delay_out_of_range",
+    "timeout_out_of_range",
+    "invalid_rule",
+    "rule_too_deep",
+    "empty_rule_group",
+    "empty_rule_value_set",
+    "unknown_condition_field",
+    "unknown_variable_path",
+    "connections_required_for_branching",
+    "no_send_email_step",
+    "template_not_found",
+    "template_not_published",
+    "template_unverified",
+    "tag_not_found",
+    "tag_unverified",
+    "contact_property_not_found",
+    "contact_property_unverified",
+    "insecure_http_url",
+    "body_ignored_for_method"
+  ],
+  notes: [
+    `connections is optional: omit it and the server links steps in array order with branch "next". A graph containing a condition or wait_for_event step is REJECTED with connections_required_for_branching, so branching graphs must pass connections explicitly.`,
+    "automation.create and automation.update accept validate_only: true — a dry run that writes nothing and returns the same issues[] a real failure returns. automation.validate does the same for a graph with no automation in existence yet.",
+    "Failures return coded issues[] ({code, severity, step_key?, path?, message}), not zod paths. Read the codes, fix the graph, retry.",
+    "Saving is never blocked for draft/paused/archived automations — issues ride along informationally. A graph update to an ACTIVE automation with errors is refused; pause, save, then start again.",
+    "Each step's outputs are addressable from later conditions as steps.<step_key>.*; the trigger's event payload is steps.<trigger_step_key>.event.* — the correlation namespace for wait_for_event and event triggers.",
+    "http_request sends Mailtea-Automation-Run, Mailtea-Automation-Step and Mailtea-Automation-Attempt headers. Delivery is AT-LEAST-ONCE; the (run, step) pair is stable across attempts and is the receiver's dedupe key.",
+    "There is deliberately no test tool: a test run sends real, billed email. Test runs are excluded from every metric.",
+    "Metrics are keyed by step_key, so renaming a step key orphans that step's history.",
+    "event.send is idempotent on idempotency_key: a replay returns the ORIGINAL event id with enrolled_automations: 0, resumed_runs: 0, replayed: true. resumed_runs: 0 does not prove the event matched nothing — read the run, not the counter."
+  ]
+} as const;
+
 export const MCP_TOOLS = [
   {
     name: "auth.me",
@@ -1997,7 +2340,7 @@ export const MCP_TOOLS = [
           type: "array",
           items: { type: "string" },
           description:
-            "Event types to subscribe to. One or more of: email.received, email.sent, email.delivered, email.delivery_delayed, email.bounced, email.complained, email.opened, email.clicked, email.failed, email.suppressed, contact.created, contact.updated, contact.deleted, contact.unsubscribed."
+            "Event types to subscribe to. One or more of: email.received, email.sent, email.delivered, email.delivery_delayed, email.bounced, email.complained, email.opened, email.clicked, email.failed, email.suppressed, contact.created, contact.updated, contact.deleted, contact.unsubscribed, contact.tag_subscribed, contact.tag_unsubscribed, automation.run.started, automation.run.completed, automation.run.failed, automation.run.exited, automation.step.completed. automation.run.exited is distinct from completed: it means the contact left the journey early (unsubscribed, suppressed, archived) and carries the reason. automation.step.completed fires for side-effecting steps only. contact.tag_subscribed and contact.tag_unsubscribed fire only on a genuine change in effective tag membership, so re-asserting an opt-out tag's default emits nothing."
         }
       },
       required: ["publicationId", "endpoint", "events"]
@@ -2358,6 +2701,370 @@ export const MCP_TOOLS = [
       },
       required: ["keyId"]
     }
+  },
+  {
+    name: "automation.create",
+    description: `Create an automation — a triggered email journey graph — in draft status. ${AUTOMATION_SNAKE_CASE_HELP} ${AUTOMATION_TRIGGER_HELP} ${AUTOMATION_STEP_CONFIG_HELP} Failures come back as coded issues[], not zod errors; pass validate_only to rehearse a graph before committing it. ${AUTOMATION_CATALOG_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publication_id: { type: "string", description: "Publication the automation belongs to." },
+        name: { type: "string", description: "Automation name (max 120 chars)." },
+        description: { type: "string", description: "Optional description (max 500 chars)." },
+        steps: AUTOMATION_STEPS_SCHEMA,
+        connections: AUTOMATION_CONNECTIONS_SCHEMA,
+        reentry_policy: {
+          type: "string",
+          enum: ["once", "once_per_window", "always"],
+          description:
+            "How often one contact may enter. Default once. once_per_window REQUIRES reentry_window_seconds, which is rejected on any other policy."
+        },
+        reentry_window_seconds: {
+          type: ["number", "null"],
+          description:
+            "Re-entry window in seconds. Valid only with reentry_policy once_per_window; pass null to leave it unset."
+        },
+        on_step_failure: {
+          type: "string",
+          enum: ["fail", "continue"],
+          description: "What a failing step does to the run. Default fail."
+        },
+        validate_only: AUTOMATION_VALIDATE_ONLY_SCHEMA
+      },
+      required: ["publication_id", "name", "steps"]
+    }
+  },
+  {
+    name: "automation.list",
+    description: `List automations for a publication. List items omit steps, connections, valid and issues — call automation.get for the graph. ${AUTOMATION_SNAKE_CASE_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publication_id: { type: "string" },
+        status: {
+          type: "string",
+          enum: ["draft", "active", "paused", "archived"],
+          description: "Filter by lifecycle status."
+        },
+        limit: { type: "number", description: "Max results (1-100, default 20)." },
+        after: { type: "string", description: "Cursor from a previous page." }
+      },
+      required: ["publication_id"]
+    }
+  },
+  {
+    name: "automation.get",
+    description: `Get one automation with its full graph (steps, connections) plus valid and issues[]. There is deliberately no automation.test tool — a test run sends real, billed email, so it is not exposed to agents. ${AUTOMATION_SNAKE_CASE_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publication_id: { type: "string" },
+        automation_id: { type: "string" }
+      },
+      required: ["publication_id", "automation_id"]
+    }
+  },
+  {
+    name: "automation.update",
+    description: `Update an automation. Pass only the fields to change; passing steps replaces the whole graph and cuts a new version. Fields you omit keep their STORED value, so reentry_window_seconds must be sent as null to clear it — switching reentry_policy from once_per_window to once or always without doing so fails with "reentry_window_seconds is only valid when reentry_policy is once_per_window" on this and every later call. Saving is never blocked for draft/paused/archived automations — issues ride along informationally — but a graph update to an ACTIVE automation with errors is refused (pause, save, start). ${AUTOMATION_SNAKE_CASE_HELP} ${AUTOMATION_STEP_CONFIG_HELP} ${AUTOMATION_CATALOG_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publication_id: { type: "string" },
+        automation_id: { type: "string" },
+        name: { type: "string", description: "Automation name (max 120 chars)." },
+        description: { type: "string", description: "Description (max 500 chars)." },
+        steps: AUTOMATION_STEPS_SCHEMA,
+        connections: AUTOMATION_CONNECTIONS_SCHEMA,
+        reentry_policy: {
+          type: "string",
+          enum: ["once", "once_per_window", "always"],
+          description:
+            "once_per_window REQUIRES reentry_window_seconds, which is rejected on any other policy."
+        },
+        reentry_window_seconds: {
+          type: ["number", "null"],
+          description:
+            "Re-entry window in seconds. A PATCH merges with the STORED value, so moving off once_per_window means clearing this in the SAME call — pass null. Omitting it keeps the stored window, which the server then rejects against the new policy."
+        },
+        on_step_failure: { type: "string", enum: ["fail", "continue"] },
+        validate_only: AUTOMATION_VALIDATE_ONLY_SCHEMA
+      },
+      required: ["publication_id", "automation_id"]
+    }
+  },
+  {
+    name: "automation.validate",
+    description: `Validate a graph without creating anything — the standalone dry run for a graph with no automation in existence yet. Returns {valid, issues[]} with the same coded issues a create or update failure returns. ${AUTOMATION_SNAKE_CASE_HELP} ${AUTOMATION_STEP_CONFIG_HELP} ${AUTOMATION_CATALOG_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publication_id: { type: "string" },
+        steps: AUTOMATION_STEPS_SCHEMA,
+        connections: AUTOMATION_CONNECTIONS_SCHEMA
+      },
+      required: ["publication_id", "steps"]
+    }
+  },
+  {
+    name: "automation.enable",
+    description: `Activate an automation so it starts enrolling contacts. Refused with coded issues[] when the graph has errors. There is deliberately no automation.test tool — a test run sends real, billed email, so it is not exposed to agents. ${AUTOMATION_SNAKE_CASE_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publication_id: { type: "string" },
+        automation_id: { type: "string" }
+      },
+      required: ["publication_id", "automation_id"]
+    }
+  },
+  {
+    name: "automation.disable",
+    description: `Pause an automation: it stops enrolling new contacts. In-flight runs are LEFT RUNNING unless cancel_runs is true. ${AUTOMATION_SNAKE_CASE_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publication_id: { type: "string" },
+        automation_id: { type: "string" },
+        cancel_runs: {
+          type: "boolean",
+          description: "Also cancel in-flight runs. Defaults to false for pause.",
+          default: false
+        }
+      },
+      required: ["publication_id", "automation_id"]
+    }
+  },
+  {
+    name: "automation.archive",
+    description: `Archive an automation. In-flight runs are canceled unless cancel_runs is false. Returns canceled_runs. ${AUTOMATION_SNAKE_CASE_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publication_id: { type: "string" },
+        automation_id: { type: "string" },
+        cancel_runs: {
+          type: "boolean",
+          description: "Cancel in-flight runs. Defaults to true for archive.",
+          default: true
+        }
+      },
+      required: ["publication_id", "automation_id"]
+    }
+  },
+  {
+    name: "automation.delete",
+    description: `Permanently delete an automation. Deleting an ACTIVE automation is refused with automation_active and its active_run_count — pause or archive it first. ${AUTOMATION_SNAKE_CASE_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publication_id: { type: "string" },
+        automation_id: { type: "string" }
+      },
+      required: ["publication_id", "automation_id"]
+    }
+  },
+  {
+    name: "automation.versions",
+    description: `List an automation's graph versions, newest first — version number, graph_hash, trigger, is_live and created_at, without the graph itself. Versions are not cosmetic: an in-flight run is PINNED to the version it started on, so updating steps cuts a new version and leaves every running contact executing the old graph. Call automation.version for one version's steps and connections. ${AUTOMATION_SNAKE_CASE_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publication_id: { type: "string" },
+        automation_id: { type: "string" },
+        limit: { type: "number", description: "Max results (1-100, default 20)." },
+        after: { type: "string", description: "Cursor from a previous page." }
+      },
+      required: ["publication_id", "automation_id"]
+    }
+  },
+  {
+    name: "automation.version",
+    description: `Get one historical graph version in full, including its steps and connections. This is the graph a run pinned to that version is actually executing, so read it — not the live automation — when explaining what an in-flight or completed run did. ${AUTOMATION_SNAKE_CASE_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publication_id: { type: "string" },
+        automation_id: { type: "string" },
+        version: {
+          type: "number",
+          description:
+            "Version number (a positive integer), as returned by automation.versions or as run.version on a run."
+        }
+      },
+      required: ["publication_id", "automation_id", "version"]
+    }
+  },
+  {
+    name: "automation.metrics",
+    description: `Per-step performance for an automation: run totals plus entered/succeeded/failed/skipped/waiting per step, branch splits for condition and wait_for_event, and email counters for send_email. Test runs are excluded. Metrics are keyed by step_key, so renaming a step orphans its history. ${AUTOMATION_SNAKE_CASE_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publication_id: { type: "string" },
+        automation_id: { type: "string" },
+        version: {
+          type: "number",
+          description: "Restrict to one graph version. Omit to aggregate across ALL versions."
+        },
+        since: { type: "string", description: "ISO 8601 lower bound." },
+        until: { type: "string", description: "ISO 8601 upper bound." }
+      },
+      required: ["publication_id", "automation_id"]
+    }
+  },
+  {
+    name: "automation_run.list",
+    description: `List runs of an automation. Each run pins the graph version it started on. ${AUTOMATION_SNAKE_CASE_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publication_id: { type: "string" },
+        automation_id: { type: "string" },
+        status: {
+          type: "string",
+          description:
+            "Comma-separated run statuses: scheduled, executing, waiting_event, completed, failed, canceled, exited."
+        },
+        contact_id: { type: "string", description: "Only runs for this contact." },
+        is_test: { type: "boolean", description: "Filter test runs in or out." },
+        limit: { type: "number", description: "Max results (1-100, default 20)." },
+        after: { type: "string", description: "Cursor from a previous page." }
+      },
+      required: ["publication_id", "automation_id"]
+    }
+  },
+  {
+    name: "automation_run.get",
+    description: `Get one run in full: the PINNED graph it is executing (not the live one), current step, waiting state, last error, and per-step step_runs. ${AUTOMATION_SNAKE_CASE_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publication_id: { type: "string" },
+        automation_id: { type: "string" },
+        run_id: { type: "string" }
+      },
+      required: ["publication_id", "automation_id", "run_id"]
+    }
+  },
+  {
+    name: "automation_run.cancel",
+    description: `Cancel one in-flight run. Returns the run in full. ${AUTOMATION_SNAKE_CASE_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publication_id: { type: "string" },
+        automation_id: { type: "string" },
+        run_id: { type: "string" }
+      },
+      required: ["publication_id", "automation_id", "run_id"]
+    }
+  },
+  {
+    name: "event.send",
+    description: `Ingest a custom event. Enrolls contacts into automations triggered on that event name and resumes runs waiting for it. Provide exactly one of contact_id or email. Idempotent on idempotency_key: a replay returns the ORIGINAL event id with enrolled_automations: 0, resumed_runs: 0, replayed: true. resumed_runs: 0 does not prove nothing matched — read the run, not the counter. ${AUTOMATION_SNAKE_CASE_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publication_id: { type: "string" },
+        event_name: {
+          type: "string",
+          description: "Event name, pattern ^[a-z0-9][a-z0-9._-]{0,63}$. Sent as `name` to the API."
+        },
+        contact_id: { type: "string", description: "Contact to attribute the event to. Provide this OR email." },
+        email: { type: "string", description: "Contact email. Provide this OR contact_id." },
+        create_contact: {
+          type: "boolean",
+          description:
+            "Create the contact when the email resolves to nobody. Opt-in: without it an unresolvable contact is a 404.",
+          default: false
+        },
+        properties: {
+          type: "object",
+          description:
+            "Event payload, readable from conditions as event.properties.*. Max 32 KB serialized, 8 levels deep. `__proto__` keys are refused."
+        },
+        occurred_at: { type: "string", description: "ISO 8601 timestamp. Defaults to now." },
+        idempotency_key: { type: "string", description: "Replay guard; see the description." }
+      },
+      required: ["publication_id", "event_name"]
+    }
+  },
+  {
+    name: "event_definition.list",
+    description: `List declared event definitions for a publication. ${AUTOMATION_SNAKE_CASE_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publication_id: { type: "string" },
+        limit: { type: "number", description: "Max results (1-100, default 20)." },
+        after: { type: "string", description: "Cursor from a previous page." }
+      },
+      required: ["publication_id"]
+    }
+  },
+  {
+    name: "event_definition.get",
+    description: `Get one event definition, including inferred_properties computed over the last 500 events. Watch the coverage figure: a condition on a key present in 3% of events will almost never match. ${AUTOMATION_SNAKE_CASE_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publication_id: { type: "string" },
+        definition_id: { type: "string" }
+      },
+      required: ["publication_id", "definition_id"]
+    }
+  },
+  {
+    name: "event_definition.create",
+    description: `Declare an event name and its optional property schema so operators and agents can discover it. ${EVENT_SCHEMA_DOCUMENT_HELP} ${AUTOMATION_SNAKE_CASE_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publication_id: { type: "string" },
+        event_name: {
+          type: "string",
+          description: "Event name, pattern ^[a-z0-9][a-z0-9._-]{0,63}$. Sent as `name` to the API."
+        },
+        description: { type: "string" },
+        schema_json: {
+          type: "object",
+          description:
+            "Event schema document — NOT JSON Schema. Only the keys {properties, additional_properties} are accepted; see the tool description for the grammar and an example."
+        }
+      },
+      required: ["publication_id", "event_name"]
+    }
+  },
+  {
+    name: "event_definition.update",
+    description: `Update an event definition's description or schema. The event name is immutable — renaming is refused with event_name_immutable. Omitting schema_json leaves the stored schema untouched; passing schema_json: null CLEARS it and returns the event to free-form. ${EVENT_SCHEMA_DOCUMENT_HELP} ${AUTOMATION_SNAKE_CASE_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publication_id: { type: "string" },
+        definition_id: { type: "string" },
+        description: { type: "string" },
+        schema_json: {
+          type: ["object", "null"],
+          description:
+            "Event schema document — NOT JSON Schema. Only the keys {properties, additional_properties} are accepted; see the tool description for the grammar and an example. Pass null to clear the stored schema, or omit the key to leave it alone."
+        }
+      },
+      required: ["publication_id", "definition_id"]
+    }
+  },
+  {
+    name: "event_definition.delete",
+    description: `Delete an event definition. This removes the DECLARATION only: past events are not deleted and ingest is not stopped — the next event of this name recreates the definition with source "auto", losing the description and schema_json. To stop enforcing a schema while keeping the declaration, call event_definition.update with schema_json: null instead. ${AUTOMATION_SNAKE_CASE_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publication_id: { type: "string" },
+        definition_id: { type: "string" }
+      },
+      required: ["publication_id", "definition_id"]
+    }
   }
 ] as const;
 
@@ -2378,6 +3085,20 @@ export const MCP_RESOURCES = [
     uri: "analytics://current/latest-summary",
     name: "Latest Analytics Summary",
     description: "Most recent newsletter engagement snapshot",
+    mimeType: "application/json"
+  },
+  {
+    uri: "mailtea://automations/step-types",
+    name: "Automation Step Types",
+    description:
+      "Machine-readable catalog of automation trigger types, step types, config shapes, branch labels and validation codes",
+    mimeType: "application/json"
+  },
+  {
+    uri: "mailtea://automations/condition-fields",
+    name: "Automation Condition Fields",
+    description:
+      "Rule DSL for condition steps and filters: operators, addressable field namespaces, value references, rule node shapes, and the event schema_json document vocabulary",
     mimeType: "application/json"
   }
 ] as const;
@@ -2547,6 +3268,25 @@ function readOptionalNumber(args: Record<string, unknown>, key: string): number 
   return value;
 }
 
+/**
+ * Three-state reader: absent stays `undefined`, an EXPLICIT null survives as
+ * `null`, anything else goes through `readOptionalNumber`. Callers must forward
+ * `null` and omit `undefined` — a PATCH merges with stored values, so an
+ * automation moved off `once_per_window` can only shed its stored
+ * `reentry_window_seconds` by clearing it, and conflating the two states either
+ * strands it on a permanent 400 or wipes a field nobody asked to change.
+ */
+function readNullableNumber(
+  args: Record<string, unknown>,
+  key: string
+): number | null | undefined {
+  if (args[key] === null) {
+    return null;
+  }
+
+  return readOptionalNumber(args, key);
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -2582,6 +3322,18 @@ function readOptionalJsonObject(
   return value as Record<string, unknown>;
 }
 
+/** Three-state counterpart to `readOptionalJsonObject`; see `readNullableNumber`. */
+function readNullableJsonObject(
+  args: Record<string, unknown>,
+  key: string
+): Record<string, unknown> | null | undefined {
+  if (args[key] === null) {
+    return null;
+  }
+
+  return readOptionalJsonObject(args, key);
+}
+
 function readRequiredJsonObjectArray(
   args: Record<string, unknown>,
   key: string
@@ -2598,6 +3350,46 @@ function readRequiredJsonObjectArray(
 
     return item as Record<string, unknown>;
   });
+}
+
+function readOptionalJsonObjectArray(
+  args: Record<string, unknown>,
+  key: string
+): Array<Record<string, unknown>> | undefined {
+  const value = args[key];
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!Array.isArray(value)) {
+    throw new Error(`Argument ${key} must be an array of objects`);
+  }
+
+  return value.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new Error(`Argument ${key} must be an array of objects`);
+    }
+
+    return item as Record<string, unknown>;
+  });
+}
+
+/** Build `path?a=1&b=2`, skipping every argument the caller omitted. */
+function withQuery(
+  path: string,
+  params: Record<string, string | number | boolean | undefined>
+): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined) {
+      continue;
+    }
+
+    query.set(key, String(value));
+  }
+
+  const serialized = query.toString();
+  return serialized ? `${path}?${serialized}` : path;
 }
 
 function readRequiredPackSections(
@@ -2799,12 +3591,96 @@ async function callRestApi<T>(
   const payload = (await httpResponse.json().catch(() => null)) as T & { error?: string } | null;
 
   if (!httpResponse.ok) {
-    throw new Error(
+    const failure = new Error(
       (payload as any)?.error ?? `${httpResponse.status} ${httpResponse.statusText}`
-    );
+    ) as Error & { issues?: unknown };
+    // Automations answer a bad graph with coded `issues[]` alongside `error`. An
+    // agent that can only see "400" cannot self-correct, so carry them along.
+    if (Array.isArray((payload as any)?.issues)) {
+      failure.issues = (payload as any).issues;
+    }
+    throw failure;
   }
 
   return payload as T;
+}
+
+type AutomationValidationIssue = {
+  code: string;
+  severity: string;
+  step_key?: string;
+  path?: string;
+  message: string;
+};
+
+/**
+ * `automation` or `automation_validation` — create/update return either,
+ * depending on `validate_only`.
+ */
+type AutomationResponse = {
+  object?: string;
+  id?: string;
+  name?: string;
+  status?: string;
+  version?: number;
+  trigger?: unknown;
+  steps?: unknown;
+  canceled_runs?: number;
+  active_run_count?: number;
+  valid?: boolean;
+  issues?: AutomationValidationIssue[];
+  [key: string]: unknown;
+};
+
+function formatAutomationIssues(issues: AutomationValidationIssue[]): string {
+  return issues
+    .map((issue) => {
+      const where = issue.step_key
+        ? ` [${issue.step_key}${issue.path ? `.${issue.path}` : ""}]`
+        : issue.path
+          ? ` [${issue.path}]`
+          : "";
+      return `- ${issue.severity} ${issue.code}${where}: ${issue.message}`;
+    })
+    .join("\n");
+}
+
+/**
+ * `callRestApi` for the automation endpoints. Re-throws a graph rejection with
+ * the coded `issues[]` serialized into the message — an agent that cannot see
+ * them cannot fix the graph, which is the whole point of the codes.
+ */
+async function callAutomationApi<T>(
+  method: "GET" | "POST" | "PATCH" | "DELETE",
+  path: string,
+  body: unknown | undefined,
+  options: McpRuntimeOptions
+): Promise<T> {
+  try {
+    return await callRestApi<T>(method, path, body, options);
+  } catch (err) {
+    const issues = (err as { issues?: unknown }).issues;
+    if (Array.isArray(issues) && issues.length > 0) {
+      throw new Error(
+        `${toErrorMessage(err)}\n${formatAutomationIssues(issues as AutomationValidationIssue[])}`
+      );
+    }
+
+    throw err;
+  }
+}
+
+/** Summarize `{valid, issues}` for the human-readable half of a tool result. */
+function describeAutomationIssues(result: {
+  valid?: boolean;
+  issues?: AutomationValidationIssue[];
+}): string {
+  const issues = result.issues ?? [];
+  if (issues.length === 0) {
+    return result.valid === false ? "invalid" : "valid";
+  }
+
+  return `${result.valid ? "valid" : "invalid"}, ${issues.length} issue(s):\n${formatAutomationIssues(issues)}`;
 }
 
 // REST endpoints that respond with text/csv (e.g. /v1/suppressions/export) can't
@@ -5242,6 +6118,592 @@ async function runTool(
     return makeToolResult(`API key ${keyId} revoked.`, { id: keyId, revoked: true });
   }
 
+  // --- Automations & events (snake_case arguments on purpose) ---------------
+  if (toolName === "automation.create") {
+    const publicationId = readRequiredString(args, "publication_id");
+    const name = readRequiredString(args, "name");
+    const steps = readRequiredJsonObjectArray(args, "steps");
+    const connections = readOptionalJsonObjectArray(args, "connections");
+    const description = asOptionalString(args.description);
+    const reentryPolicy = asOptionalString(args.reentry_policy);
+    const reentryWindowSeconds = readNullableNumber(args, "reentry_window_seconds");
+    const onStepFailure = asOptionalString(args.on_step_failure);
+    const validateOnly = readOptionalBoolean(args, "validate_only");
+
+    const body: Record<string, unknown> = {
+      publication_id: publicationId,
+      name,
+      steps,
+      // Forward `connections` ONLY when the caller supplied it. Sending `[]` for
+      // an omitted argument would suppress the server's array-order inference.
+      ...(connections !== undefined ? { connections } : {}),
+      ...(description ? { description } : {}),
+      ...(reentryPolicy ? { reentry_policy: reentryPolicy } : {}),
+      // Explicit null is forwarded, absent is omitted — the two mean different
+      // things to the server and only the caller can tell them apart.
+      ...(reentryWindowSeconds !== undefined
+        ? { reentry_window_seconds: reentryWindowSeconds }
+        : {}),
+      ...(onStepFailure ? { on_step_failure: onStepFailure } : {}),
+      ...(validateOnly !== undefined ? { validate_only: validateOnly } : {})
+    };
+
+    const result = await callAutomationApi<AutomationResponse>(
+      "POST",
+      "/v1/automations",
+      body,
+      options
+    );
+
+    if (result.object === "automation_validation") {
+      return makeToolResult(
+        `Dry run — nothing written. Graph is ${describeAutomationIssues(result)}`,
+        result
+      );
+    }
+
+    return makeToolResult(
+      `Automation created: ${result.id} (${result.status}). Graph is ${describeAutomationIssues(result)}`,
+      { automation: result }
+    );
+  }
+
+  if (toolName === "automation.list") {
+    const publicationId = readRequiredString(args, "publication_id");
+    const status = asOptionalString(args.status);
+    const limit = readOptionalNumber(args, "limit");
+    const after = asOptionalString(args.after);
+
+    const result = await callAutomationApi<{
+      data: Array<Record<string, unknown>>;
+      has_more: boolean;
+    }>(
+      "GET",
+      withQuery("/v1/automations", {
+        publication_id: publicationId,
+        status,
+        limit,
+        after
+      }),
+      undefined,
+      options
+    );
+
+    const lines = result.data.map(
+      (automation) => `${automation.id}: ${automation.name} (${automation.status})`
+    );
+    return makeToolResult(
+      result.data.length > 0
+        ? `${result.data.length} automation(s):\n${lines.join("\n")}`
+        : "No automations found",
+      result
+    );
+  }
+
+  if (toolName === "automation.get") {
+    const publicationId = readRequiredString(args, "publication_id");
+    const automationId = readRequiredString(args, "automation_id");
+
+    const automation = await callAutomationApi<AutomationResponse>(
+      "GET",
+      withQuery(`/v1/automations/${encodeURIComponent(automationId)}`, {
+        publication_id: publicationId
+      }),
+      undefined,
+      options
+    );
+
+    const steps = Array.isArray(automation.steps) ? automation.steps.length : 0;
+    return makeToolResult(
+      `Automation ${automation.name} (${automation.status}, v${automation.version}, ${steps} step(s)). Graph is ${describeAutomationIssues(automation)}`,
+      { automation }
+    );
+  }
+
+  if (toolName === "automation.update") {
+    const publicationId = readRequiredString(args, "publication_id");
+    const automationId = readRequiredString(args, "automation_id");
+    const name = asOptionalString(args.name);
+    const steps = readOptionalJsonObjectArray(args, "steps");
+    const connections = readOptionalJsonObjectArray(args, "connections");
+    const description = asOptionalString(args.description);
+    const reentryPolicy = asOptionalString(args.reentry_policy);
+    const reentryWindowSeconds = readNullableNumber(args, "reentry_window_seconds");
+    const onStepFailure = asOptionalString(args.on_step_failure);
+    const validateOnly = readOptionalBoolean(args, "validate_only");
+
+    const body: Record<string, unknown> = {
+      ...(name ? { name } : {}),
+      ...(steps !== undefined ? { steps } : {}),
+      // Same rule as create: an omitted `connections` must stay omitted.
+      ...(connections !== undefined ? { connections } : {}),
+      ...(description ? { description } : {}),
+      ...(reentryPolicy ? { reentry_policy: reentryPolicy } : {}),
+      // A PATCH merges with stored values, so null is the only way to shed a
+      // stored window when the policy moves off once_per_window.
+      ...(reentryWindowSeconds !== undefined
+        ? { reentry_window_seconds: reentryWindowSeconds }
+        : {}),
+      ...(onStepFailure ? { on_step_failure: onStepFailure } : {}),
+      ...(validateOnly !== undefined ? { validate_only: validateOnly } : {})
+    };
+
+    const result = await callAutomationApi<AutomationResponse>(
+      "PATCH",
+      withQuery(`/v1/automations/${encodeURIComponent(automationId)}`, {
+        publication_id: publicationId
+      }),
+      body,
+      options
+    );
+
+    if (result.object === "automation_validation") {
+      return makeToolResult(
+        `Dry run — nothing written. Graph is ${describeAutomationIssues(result)}`,
+        result
+      );
+    }
+
+    return makeToolResult(
+      `Automation updated: ${result.id} (${result.status}, v${result.version}). Graph is ${describeAutomationIssues(result)}`,
+      { automation: result }
+    );
+  }
+
+  if (toolName === "automation.validate") {
+    const publicationId = readRequiredString(args, "publication_id");
+    const steps = readRequiredJsonObjectArray(args, "steps");
+    const connections = readOptionalJsonObjectArray(args, "connections");
+
+    const result = await callAutomationApi<AutomationResponse>(
+      "POST",
+      "/v1/automations/validate",
+      {
+        publication_id: publicationId,
+        steps,
+        ...(connections !== undefined ? { connections } : {})
+      },
+      options
+    );
+
+    return makeToolResult(`Graph is ${describeAutomationIssues(result)}`, result);
+  }
+
+  if (toolName === "automation.enable") {
+    const publicationId = readRequiredString(args, "publication_id");
+    const automationId = readRequiredString(args, "automation_id");
+
+    const automation = await callAutomationApi<AutomationResponse>(
+      "POST",
+      withQuery(`/v1/automations/${encodeURIComponent(automationId)}/activate`, {
+        publication_id: publicationId
+      }),
+      undefined,
+      options
+    );
+
+    return makeToolResult(
+      `Automation ${automation.id} is now ${automation.status} — it will enroll contacts on ${(automation.trigger as { trigger_type?: string } | undefined)?.trigger_type}.`,
+      { automation }
+    );
+  }
+
+  if (toolName === "automation.disable") {
+    const publicationId = readRequiredString(args, "publication_id");
+    const automationId = readRequiredString(args, "automation_id");
+    const cancelRuns = readOptionalBoolean(args, "cancel_runs");
+
+    const automation = await callAutomationApi<AutomationResponse>(
+      "POST",
+      withQuery(`/v1/automations/${encodeURIComponent(automationId)}/pause`, {
+        publication_id: publicationId
+      }),
+      cancelRuns !== undefined ? { cancel_runs: cancelRuns } : {},
+      options
+    );
+
+    return makeToolResult(
+      `Automation ${automation.id} is now ${automation.status}. ${automation.canceled_runs ?? 0} run(s) canceled, ${automation.active_run_count ?? 0} still in flight.`,
+      { automation }
+    );
+  }
+
+  if (toolName === "automation.archive") {
+    const publicationId = readRequiredString(args, "publication_id");
+    const automationId = readRequiredString(args, "automation_id");
+    const cancelRuns = readOptionalBoolean(args, "cancel_runs");
+
+    const automation = await callAutomationApi<AutomationResponse>(
+      "POST",
+      withQuery(`/v1/automations/${encodeURIComponent(automationId)}/archive`, {
+        publication_id: publicationId
+      }),
+      cancelRuns !== undefined ? { cancel_runs: cancelRuns } : {},
+      options
+    );
+
+    return makeToolResult(
+      `Automation ${automation.id} archived. ${automation.canceled_runs ?? 0} run(s) canceled.`,
+      { automation }
+    );
+  }
+
+  if (toolName === "automation.delete") {
+    const publicationId = readRequiredString(args, "publication_id");
+    const automationId = readRequiredString(args, "automation_id");
+
+    const result = await callAutomationApi<{ id: string; deleted: boolean }>(
+      "DELETE",
+      withQuery(`/v1/automations/${encodeURIComponent(automationId)}`, {
+        publication_id: publicationId
+      }),
+      undefined,
+      options
+    );
+
+    return makeToolResult(`Automation deleted: ${result.id}`, result);
+  }
+
+  if (toolName === "automation.versions") {
+    const publicationId = readRequiredString(args, "publication_id");
+    const automationId = readRequiredString(args, "automation_id");
+    const limit = readOptionalNumber(args, "limit");
+    const after = asOptionalString(args.after);
+
+    const result = await callAutomationApi<{
+      data: Array<Record<string, unknown>>;
+      has_more: boolean;
+    }>(
+      "GET",
+      withQuery(`/v1/automations/${encodeURIComponent(automationId)}/versions`, {
+        publication_id: publicationId,
+        limit,
+        after
+      }),
+      undefined,
+      options
+    );
+
+    const lines = result.data.map(
+      (version) =>
+        `v${version.version}${version.is_live ? " (live)" : ""}: ${version.graph_hash} created ${version.created_at}`
+    );
+    return makeToolResult(
+      result.data.length > 0
+        ? `${result.data.length} version(s):\n${lines.join("\n")}`
+        : "No versions found",
+      result
+    );
+  }
+
+  if (toolName === "automation.version") {
+    const publicationId = readRequiredString(args, "publication_id");
+    const automationId = readRequiredString(args, "automation_id");
+    const version = readOptionalNumber(args, "version");
+    if (version === undefined) {
+      throw new Error("Missing required number argument: version");
+    }
+
+    const automationVersion = await callAutomationApi<Record<string, unknown>>(
+      "GET",
+      withQuery(
+        `/v1/automations/${encodeURIComponent(automationId)}/versions/${encodeURIComponent(String(version))}`,
+        { publication_id: publicationId }
+      ),
+      undefined,
+      options
+    );
+
+    const steps = Array.isArray(automationVersion.steps) ? automationVersion.steps.length : 0;
+    return makeToolResult(
+      `Automation ${automationId} v${automationVersion.version}${automationVersion.is_live ? " (live)" : ""}: ${steps} step(s), graph_hash ${automationVersion.graph_hash}. Runs pinned to this version execute THIS graph, not the live one.`,
+      { automation_version: automationVersion }
+    );
+  }
+
+  if (toolName === "automation.metrics") {
+    const publicationId = readRequiredString(args, "publication_id");
+    const automationId = readRequiredString(args, "automation_id");
+    const version = readOptionalNumber(args, "version");
+    const since = asOptionalString(args.since);
+    const until = asOptionalString(args.until);
+
+    const metrics = await callAutomationApi<{
+      runs?: { active?: number; waiting?: number };
+      steps?: Array<Record<string, unknown>>;
+    }>(
+      "GET",
+      withQuery(`/v1/automations/${encodeURIComponent(automationId)}/metrics`, {
+        publication_id: publicationId,
+        version,
+        since,
+        until
+      }),
+      undefined,
+      options
+    );
+
+    return makeToolResult(
+      `Metrics for ${automationId} (${version === undefined ? "all versions" : `v${version}`}, test runs excluded): ${metrics.runs?.active ?? 0} active, ${metrics.runs?.waiting ?? 0} waiting, ${metrics.steps?.length ?? 0} step(s) reported.`,
+      metrics
+    );
+  }
+
+  if (toolName === "automation_run.list") {
+    const publicationId = readRequiredString(args, "publication_id");
+    const automationId = readRequiredString(args, "automation_id");
+    const status = asOptionalString(args.status);
+    const contactId = asOptionalString(args.contact_id);
+    const isTest = readOptionalBoolean(args, "is_test");
+    const limit = readOptionalNumber(args, "limit");
+    const after = asOptionalString(args.after);
+
+    const result = await callAutomationApi<{
+      data: Array<Record<string, unknown>>;
+      has_more: boolean;
+    }>(
+      "GET",
+      withQuery(`/v1/automations/${encodeURIComponent(automationId)}/runs`, {
+        publication_id: publicationId,
+        status,
+        contact_id: contactId,
+        is_test: isTest,
+        limit,
+        after
+      }),
+      undefined,
+      options
+    );
+
+    const lines = result.data.map((run) => {
+      const contact = run.contact as { email?: string } | null;
+      return `${run.id}: ${run.status} at ${run.current_step_key ?? "-"} (${contact?.email ?? "no contact"})`;
+    });
+    return makeToolResult(
+      result.data.length > 0
+        ? `${result.data.length} run(s):\n${lines.join("\n")}`
+        : "No runs found",
+      result
+    );
+  }
+
+  if (toolName === "automation_run.get") {
+    const publicationId = readRequiredString(args, "publication_id");
+    const automationId = readRequiredString(args, "automation_id");
+    const runId = readRequiredString(args, "run_id");
+
+    const run = await callAutomationApi<Record<string, unknown>>(
+      "GET",
+      withQuery(
+        `/v1/automations/${encodeURIComponent(automationId)}/runs/${encodeURIComponent(runId)}`,
+        { publication_id: publicationId }
+      ),
+      undefined,
+      options
+    );
+
+    const waiting = run.waiting as { resume_at?: string | null; waiting_event_name?: string | null } | undefined;
+    const waitingSuffix = waiting?.resume_at
+      ? ` Resumes at ${waiting.resume_at}.`
+      : waiting?.waiting_event_name
+        ? ` Waiting for event ${waiting.waiting_event_name}.`
+        : "";
+    return makeToolResult(
+      `Run ${run.id}: ${run.status} at ${run.current_step_key ?? "-"} on pinned v${run.version}.${waitingSuffix}`,
+      { automation_run: run }
+    );
+  }
+
+  if (toolName === "automation_run.cancel") {
+    const publicationId = readRequiredString(args, "publication_id");
+    const automationId = readRequiredString(args, "automation_id");
+    const runId = readRequiredString(args, "run_id");
+
+    const run = await callAutomationApi<Record<string, unknown>>(
+      "POST",
+      withQuery(
+        `/v1/automations/${encodeURIComponent(automationId)}/runs/${encodeURIComponent(runId)}/cancel`,
+        { publication_id: publicationId }
+      ),
+      undefined,
+      options
+    );
+
+    return makeToolResult(`Run ${run.id} is now ${run.status}.`, { automation_run: run });
+  }
+
+  if (toolName === "event.send") {
+    const publicationId = readRequiredString(args, "publication_id");
+    const eventName = readRequiredString(args, "event_name");
+    const contactId = asOptionalString(args.contact_id);
+    const email = asOptionalString(args.email);
+    const createContact = readOptionalBoolean(args, "create_contact");
+    const properties = readOptionalJsonObject(args, "properties");
+    const occurredAt = asOptionalString(args.occurred_at);
+    const idempotencyKey = asOptionalString(args.idempotency_key);
+
+    // XOR on contact_id / email, caught here so an agent gets a clear message
+    // instead of a contact_reference_conflict round-trip.
+    if ((contactId === undefined) === (email === undefined)) {
+      throw new Error("Provide exactly one of 'contact_id' or 'email'.");
+    }
+
+    const result = await callAutomationApi<{
+      id: string;
+      name: string;
+      enrolled_automations?: number;
+      resumed_runs?: number;
+      replayed?: boolean;
+    }>(
+      "POST",
+      "/v1/events",
+      {
+        publication_id: publicationId,
+        name: eventName,
+        ...(contactId ? { contact_id: contactId } : {}),
+        ...(email ? { email } : {}),
+        ...(createContact !== undefined ? { create_contact: createContact } : {}),
+        ...(properties ? { properties } : {}),
+        ...(occurredAt ? { occurred_at: occurredAt } : {}),
+        ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {})
+      },
+      options
+    );
+
+    return makeToolResult(
+      result.replayed
+        ? `Event ${eventName} replayed — idempotency_key already used, returning the original event ${result.id}. Nothing was enrolled or resumed.`
+        : `Event ${eventName} ingested as ${result.id}: ${result.enrolled_automations ?? 0} automation(s) enrolled, ${result.resumed_runs ?? 0} run(s) resumed. A resumed_runs of 0 does not prove nothing matched — read the run.`,
+      result
+    );
+  }
+
+  if (toolName === "event_definition.list") {
+    const publicationId = readRequiredString(args, "publication_id");
+    const limit = readOptionalNumber(args, "limit");
+    const after = asOptionalString(args.after);
+
+    const result = await callAutomationApi<{
+      data: Array<Record<string, unknown>>;
+      has_more: boolean;
+    }>(
+      "GET",
+      withQuery("/v1/event-definitions", {
+        publication_id: publicationId,
+        limit,
+        after
+      }),
+      undefined,
+      options
+    );
+
+    const lines = result.data.map(
+      (definition) => `${definition.id}: ${definition.name} (${definition.source})`
+    );
+    return makeToolResult(
+      result.data.length > 0
+        ? `${result.data.length} event definition(s):\n${lines.join("\n")}`
+        : "No event definitions found",
+      result
+    );
+  }
+
+  if (toolName === "event_definition.get") {
+    const publicationId = readRequiredString(args, "publication_id");
+    const definitionId = readRequiredString(args, "definition_id");
+
+    const definition = await callAutomationApi<Record<string, unknown>>(
+      "GET",
+      withQuery(`/v1/event-definitions/${encodeURIComponent(definitionId)}`, {
+        publication_id: publicationId
+      }),
+      undefined,
+      options
+    );
+
+    const inferred = definition.inferred_properties;
+    const inferredCount = Array.isArray(inferred)
+      ? inferred.length
+      : inferred && typeof inferred === "object"
+        ? Object.keys(inferred).length
+        : 0;
+    return makeToolResult(
+      `Event definition ${definition.name} (${definition.source}); ${inferredCount} inferred propert(ies) from ${definition.inference_sample_size ?? 0} sampled event(s) — check each one's coverage before conditioning on it.`,
+      { event_definition: definition }
+    );
+  }
+
+  if (toolName === "event_definition.create") {
+    const publicationId = readRequiredString(args, "publication_id");
+    const eventName = readRequiredString(args, "event_name");
+    const description = asOptionalString(args.description);
+    // Nothing is stored yet, so null and absent both mean "no schema" here.
+    const schemaJson = readNullableJsonObject(args, "schema_json");
+
+    const definition = await callAutomationApi<Record<string, unknown>>(
+      "POST",
+      "/v1/event-definitions",
+      {
+        publication_id: publicationId,
+        name: eventName,
+        ...(description ? { description } : {}),
+        ...(schemaJson ? { schema_json: schemaJson } : {})
+      },
+      options
+    );
+
+    return makeToolResult(
+      `Event definition created: ${definition.id} (${definition.name})`,
+      { event_definition: definition }
+    );
+  }
+
+  if (toolName === "event_definition.update") {
+    const publicationId = readRequiredString(args, "publication_id");
+    const definitionId = readRequiredString(args, "definition_id");
+    const description = asOptionalString(args.description);
+    const schemaJson = readNullableJsonObject(args, "schema_json");
+
+    const definition = await callAutomationApi<Record<string, unknown>>(
+      "PATCH",
+      withQuery(`/v1/event-definitions/${encodeURIComponent(definitionId)}`, {
+        publication_id: publicationId
+      }),
+      {
+        ...(description ? { description } : {}),
+        // The server keys off hasOwnProperty here: an absent schema_json leaves
+        // the stored schema alone, an explicit null clears it. Sending null for
+        // an omitted argument would wipe schemas nobody asked to change.
+        ...(schemaJson !== undefined ? { schema_json: schemaJson } : {})
+      },
+      options
+    );
+
+    return makeToolResult(
+      `Event definition updated: ${definition.id} (${definition.name})`,
+      { event_definition: definition }
+    );
+  }
+
+  if (toolName === "event_definition.delete") {
+    const publicationId = readRequiredString(args, "publication_id");
+    const definitionId = readRequiredString(args, "definition_id");
+
+    const result = await callAutomationApi<{ id: string; deleted: boolean }>(
+      "DELETE",
+      withQuery(`/v1/event-definitions/${encodeURIComponent(definitionId)}`, {
+        publication_id: publicationId
+      }),
+      undefined,
+      options
+    );
+
+    return makeToolResult(
+      `Event definition deleted: ${result.id}. Past events are kept and ingest continues — the next event of this name recreates the definition as source "auto", without the description or schema.`,
+      result
+    );
+  }
+
   throw new Error(`Unknown tool: ${toolName}`);
 }
 
@@ -5280,6 +6742,66 @@ async function readResource(uri: string, options: McpRuntimeOptions) {
               notes: [
                 "All tools call Mailtea API endpoints.",
                 "Use a PAT or Better Auth session token in Authorization header."
+              ]
+            },
+            null,
+            2
+          )
+        }
+      ]
+    };
+  }
+
+  if (uri === "mailtea://automations/step-types") {
+    return {
+      contents: [
+        {
+          uri,
+          mimeType: "application/json",
+          text: JSON.stringify(AUTOMATION_STEP_TYPE_CATALOG, null, 2)
+        }
+      ]
+    };
+  }
+
+  if (uri === "mailtea://automations/condition-fields") {
+    return {
+      contents: [
+        {
+          uri,
+          mimeType: "application/json",
+          text: JSON.stringify(
+            {
+              ...AUTOMATION_STEP_TYPE_CATALOG.condition,
+              rule_node_shapes: [
+                `{"type": "and" | "or", "rules": [...]}`,
+                `{"type": "rule", "field": "<path>", "operator": "<operator>", "value": <literal | array | {"var": "<path>"}>}`
+              ],
+              // event.properties.* is an open namespace; this is the vocabulary
+              // that declares what lives in it, and it is NOT JSON Schema.
+              event_schema_document: {
+                applies_to: "event_definition.create / event_definition.update schema_json",
+                not_json_schema:
+                  `Top-level {"type", "required"} are REFUSED with invalid_event_schema — they belong on each property.`,
+                top_level_keys: ["properties", "additional_properties"],
+                property_keys: ["type", "required", "description"],
+                property_types: ["string", "number", "boolean", "object", "array", "null"],
+                max_properties: 200,
+                additional_properties_default: true,
+                example: {
+                  properties: {
+                    plan: { type: "string", required: true, description: "Plan the contact bought" },
+                    seats: { type: ["number", "null"] }
+                  },
+                  additional_properties: false
+                }
+              },
+              notes: [
+                "Presence operators (exists, is_empty) ignore value entirely; set operators (in, not_in) require an array.",
+                "A path that does not resolve makes neq and not_in TRUE and every other operator FALSE; exists is false and is_empty is true.",
+                `and over an empty rules array is TRUE (vacuous), or over an empty array is FALSE. Malformed nodes, unknown operators and over-depth trees all evaluate FALSE.`,
+                "Fields outside the known catalog and open namespaces are a warning (unknown_condition_field), not an error — the namespace grows over time.",
+                "event.properties.* is free-form until a schema is declared. event_definition.create and event_definition.update take schema_json in the event_schema_document vocabulary above — it is NOT JSON Schema, and every unrecognised key is rejected."
               ]
             },
             null,

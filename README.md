@@ -33,12 +33,17 @@ The server defaults to the Mailtea cloud API. Self-hosting or running locally? A
 - `api_key.*` — manage API keys (requires `settings:write`)
 - `analytics.*`
 - `section.*`
+- `automation.*` — multi-step contact journeys: `create`, `list`, `get`, `update`, `enable`, `disable`, `archive`, `delete`, `validate`, `metrics`. An automation is a versioned graph of `steps` + `connections`, so an agent can author one as data. `connections` is optional (steps link in array order) and becomes required only when the graph branches; `validate_only: true` on `create`/`update` is a dry run returning the same coded `issues[]` a real failure returns, so an agent can self-correct before committing. These tools take **snake_case** arguments, unlike the older camelCase tools — the graph payload is snake_case throughout and mixing the two inside one payload is a trap
+- `automation_run.*` — `list`, `get`, `cancel`. Run detail returns the graph the run is pinned to, not the live one
+- `event.*` / `event_definition.*` — `event.send` for custom event ingest (opt-in `create_contact`, `idempotency_key`, fan-out counts in the reply), plus `event_definition.list / get / create / update`
 
 Current resources:
 
 - `publication://current/brand-guidelines`
 - `mailtea://capabilities`
 - `analytics://current/latest-summary`
+- `mailtea://automations/step-types` — the machine-readable automation catalog: trigger types, step config shapes, branch labels, limits, condition operators and validation codes. Fetch it once instead of carrying the model in every tool schema
+- `mailtea://automations/condition-fields` — the rule DSL for `condition` steps and filters: operators, addressable field namespaces, `{"var": "…"}` value references, and how an unresolved path evaluates
 
 Current prompts:
 

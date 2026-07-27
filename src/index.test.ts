@@ -82,6 +82,96 @@ test("tools/list includes reusable section MCP tools", async () => {
   assert.ok(toolNames.includes("suppression.export"));
 });
 
+test("tools/list includes the automation and event MCP tools", async () => {
+  const response = await handleMcpRequest({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/list",
+    params: {}
+  });
+
+  const result = readJsonRpcResult(response);
+  const tools = result.tools as Array<{ name: string }>;
+  const toolNames = tools.map((tool) => tool.name);
+
+  assert.ok(toolNames.includes("automation.create"));
+  assert.ok(toolNames.includes("automation.list"));
+  assert.ok(toolNames.includes("automation.get"));
+  assert.ok(toolNames.includes("automation.update"));
+  assert.ok(toolNames.includes("automation.enable"));
+  assert.ok(toolNames.includes("automation.disable"));
+  assert.ok(toolNames.includes("automation.archive"));
+  assert.ok(toolNames.includes("automation.delete"));
+  assert.ok(toolNames.includes("automation.validate"));
+  assert.ok(toolNames.includes("automation.versions"));
+  assert.ok(toolNames.includes("automation.version"));
+  assert.ok(toolNames.includes("automation.metrics"));
+  assert.ok(toolNames.includes("automation_run.list"));
+  assert.ok(toolNames.includes("automation_run.get"));
+  assert.ok(toolNames.includes("automation_run.cancel"));
+  assert.ok(toolNames.includes("event.send"));
+  assert.ok(toolNames.includes("event_definition.list"));
+  assert.ok(toolNames.includes("event_definition.get"));
+  assert.ok(toolNames.includes("event_definition.create"));
+  assert.ok(toolNames.includes("event_definition.update"));
+  assert.ok(toolNames.includes("event_definition.delete"));
+
+  // A test run sends real, billed email, so it is deliberately not exposed.
+  assert.ok(!toolNames.includes("automation.test"));
+});
+
+test("resources/list and resources/read expose the automation step-type catalog", async () => {
+  const listResponse = await handleMcpRequest({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "resources/list",
+    params: {}
+  });
+
+  const listResult = readJsonRpcResult(listResponse);
+  const resources = listResult.resources as Array<{ uri: string; mimeType: string }>;
+  const uris = resources.map((resource) => resource.uri);
+  assert.ok(uris.includes("mailtea://automations/step-types"));
+
+  const readResponse = await handleMcpRequest({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "resources/read",
+    params: {
+      uri: "mailtea://automations/step-types"
+    }
+  });
+
+  const readResult = readJsonRpcResult(readResponse);
+  const contents = readResult.contents as Array<{ uri: string; mimeType: string; text: string }>;
+  assert.equal(contents[0]!.mimeType, "application/json");
+
+  const catalog = JSON.parse(contents[0]!.text) as {
+    trigger_types: Array<{ type: string; requires_trigger_key: boolean }>;
+    step_types: Array<{ type: string; branches: string[] }>;
+    branches: string[];
+    limits: Record<string, unknown>;
+    condition: { operators: string[]; max_depth: number };
+    validation_codes: string[];
+    notes: string[];
+  };
+
+  assert.equal(catalog.step_types.length, 10);
+  assert.equal(catalog.trigger_types.length, 9);
+  assert.equal(catalog.branches.length, 5);
+  assert.equal(catalog.condition.operators.length, 13);
+  assert.equal(catalog.condition.max_depth, 10);
+  assert.equal(catalog.limits.step_key_pattern, "^[a-z0-9_-]{1,64}$");
+  assert.ok(catalog.validation_codes.includes("connections_required_for_branching"));
+  assert.ok(catalog.notes.length > 0);
+
+  const condition = catalog.step_types.find((step) => step.type === "condition");
+  assert.deepEqual(condition?.branches, ["condition_met", "condition_not_met"]);
+
+  const eventTrigger = catalog.trigger_types.find((trigger) => trigger.type === "event");
+  assert.equal(eventTrigger?.requires_trigger_key, true);
+});
+
 test("issue.delivery_progress calls query endpoint", async () => {
   const calls: FetchCall[] = [];
   const fetchImpl: typeof fetch = async (url, init) => {
@@ -4040,4 +4130,373 @@ test("email.inbound_reply with neither html nor text errors before any request",
   assert.equal(calls.length, 0);
   assert.ok(response.error);
   assert.match(response.error!.message, /html.*text|text.*html/i);
+});
+
+test("automation.create omits connections entirely when the caller omitted it", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return restOk({
+      object: "automation",
+      id: "auto_1",
+      status: "draft",
+      valid: true,
+      issues: []
+    });
+  };
+
+  const response = await callTool(
+    "automation.create",
+    {
+      publication_id: "pub_demo",
+      name: "Welcome",
+      steps: [
+        { key: "start", type: "trigger", config: { trigger_type: "contact.subscribed" } },
+        { key: "welcome", type: "send_email", config: { template_id: "tmpl_1" } }
+      ]
+    },
+    fetchImpl
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(new URL(calls[0]!.url).pathname, "/v1/automations");
+  const body = JSON.parse(String(calls[0]!.init?.body)) as Record<string, unknown>;
+  // Sending `connections: []` would defeat the server's array-order inference.
+  assert.ok(!("connections" in body));
+  assert.ok(!("validate_only" in body));
+
+  const content = readJsonRpcResult(response).content as Array<{ text: string }>;
+  assert.match(content[0]!.text, /auto_1/);
+});
+
+test("automation.create forwards connections and validate_only when supplied", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return restOk({ object: "automation_validation", valid: true, issues: [] });
+  };
+
+  const response = await callTool(
+    "automation.create",
+    {
+      publication_id: "pub_demo",
+      name: "Branching",
+      steps: [
+        { key: "start", type: "trigger", config: { trigger_type: "contact.subscribed" } },
+        {
+          key: "is_pro",
+          type: "condition",
+          config: {
+            rule: { type: "rule", field: "contact.status", operator: "eq", value: "subscribed" }
+          }
+        },
+        { key: "welcome", type: "send_email", config: { template_id: "tmpl_1" } }
+      ],
+      connections: [
+        { from: "start", to: "is_pro" },
+        { from: "is_pro", to: "welcome", branch: "condition_met" }
+      ],
+      validate_only: true
+    },
+    fetchImpl
+  );
+
+  const body = JSON.parse(String(calls[0]!.init?.body)) as Record<string, unknown>;
+  assert.equal(body.validate_only, true);
+  assert.deepEqual(body.connections, [
+    { from: "start", to: "is_pro" },
+    { from: "is_pro", to: "welcome", branch: "condition_met" }
+  ]);
+
+  const content = readJsonRpcResult(response).content as Array<{ text: string }>;
+  assert.match(content[0]!.text, /Dry run/);
+});
+
+test("a rejected graph surfaces the coded issues, not just the status", async () => {
+  const fetchImpl: typeof fetch = async () =>
+    restOk(
+      {
+        error: "Automation graph is invalid",
+        issues: [
+          {
+            code: "connections_required_for_branching",
+            severity: "error",
+            step_key: "is_pro",
+            message: "A graph with a condition step must declare connections."
+          }
+        ]
+      },
+      400
+    );
+
+  const response = await callTool(
+    "automation.create",
+    {
+      publication_id: "pub_demo",
+      name: "Branching",
+      steps: [{ key: "start", type: "trigger", config: { trigger_type: "contact.subscribed" } }]
+    },
+    fetchImpl
+  );
+
+  assert.ok(response.error);
+  assert.match(response.error!.message, /connections_required_for_branching/);
+  assert.match(response.error!.message, /is_pro/);
+});
+
+test("event.send maps event_name to name and rejects an ambiguous contact reference", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return restOk(
+      {
+        object: "event",
+        id: "evt_1",
+        name: "order.placed",
+        enrolled_automations: 2,
+        resumed_runs: 1
+      },
+      202
+    );
+  };
+
+  const response = await callTool(
+    "event.send",
+    {
+      publication_id: "pub_demo",
+      event_name: "order.placed",
+      email: "user@example.com",
+      properties: { total: 42 }
+    },
+    fetchImpl
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(new URL(calls[0]!.url).pathname, "/v1/events");
+  assert.deepEqual(JSON.parse(String(calls[0]!.init?.body)), {
+    publication_id: "pub_demo",
+    name: "order.placed",
+    email: "user@example.com",
+    properties: { total: 42 }
+  });
+  const content = readJsonRpcResult(response).content as Array<{ text: string }>;
+  assert.match(content[0]!.text, /evt_1/);
+
+  const conflict = await callTool(
+    "event.send",
+    {
+      publication_id: "pub_demo",
+      event_name: "order.placed",
+      contact_id: "con_1",
+      email: "user@example.com"
+    },
+    fetchImpl
+  );
+  assert.equal(calls.length, 1);
+  assert.ok(conflict.error);
+  assert.match(conflict.error!.message, /contact_id.*email|email.*contact_id/i);
+});
+
+test("automation.disable and automation.archive hit pause and archive", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return restOk({ object: "automation", id: "auto_1", status: "paused", canceled_runs: 0 });
+  };
+
+  await callTool(
+    "automation.disable",
+    { publication_id: "pub_demo", automation_id: "auto_1" },
+    fetchImpl
+  );
+  await callTool(
+    "automation.archive",
+    { publication_id: "pub_demo", automation_id: "auto_1", cancel_runs: false },
+    fetchImpl
+  );
+  await callTool(
+    "automation.enable",
+    { publication_id: "pub_demo", automation_id: "auto_1" },
+    fetchImpl
+  );
+
+  assert.deepEqual(
+    calls.map((call) => new URL(call.url).pathname),
+    [
+      "/v1/automations/auto_1/pause",
+      "/v1/automations/auto_1/archive",
+      "/v1/automations/auto_1/activate"
+    ]
+  );
+  assert.deepEqual(JSON.parse(String(calls[1]!.init?.body)), { cancel_runs: false });
+  assert.equal(
+    new URL(calls[0]!.url).searchParams.get("publication_id"),
+    "pub_demo"
+  );
+});
+
+test("automation.update forwards an explicit reentry_window_seconds null", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return restOk({ object: "automation", id: "auto_1", status: "draft", version: 2 });
+  };
+
+  await callTool(
+    "automation.update",
+    {
+      publication_id: "pub_demo",
+      automation_id: "auto_1",
+      reentry_policy: "once",
+      reentry_window_seconds: null
+    },
+    fetchImpl
+  );
+
+  const body = JSON.parse(String(calls[0]!.init?.body)) as Record<string, unknown>;
+  // Without this the stored window survives the merge and the server refuses
+  // every later call with reentry_window_seconds_not_allowed.
+  assert.ok("reentry_window_seconds" in body);
+  assert.equal(body.reentry_window_seconds, null);
+  assert.equal(body.reentry_policy, "once");
+});
+
+test("automation.update omits reentry_window_seconds entirely when the caller omitted it", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return restOk({ object: "automation", id: "auto_1", status: "draft", version: 2 });
+  };
+
+  await callTool(
+    "automation.update",
+    { publication_id: "pub_demo", automation_id: "auto_1", name: "Renamed" },
+    fetchImpl
+  );
+
+  const body = JSON.parse(String(calls[0]!.init?.body)) as Record<string, unknown>;
+  assert.ok(!("reentry_window_seconds" in body));
+  assert.equal(body.name, "Renamed");
+});
+
+test("automation.versions and automation.version hit the versions routes", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return calls.length === 1
+      ? restOk({
+          object: "list",
+          data: [
+            {
+              object: "automation_version",
+              version: 2,
+              graph_hash: "sha_2",
+              is_live: true,
+              created_at: "2026-07-20T00:00:00.000Z"
+            }
+          ],
+          has_more: false
+        })
+      : restOk({
+          object: "automation_version",
+          version: 1,
+          graph_hash: "sha_1",
+          is_live: false,
+          steps: [{ key: "start", type: "trigger" }],
+          connections: []
+        });
+  };
+
+  const list = await callTool(
+    "automation.versions",
+    { publication_id: "pub_demo", automation_id: "auto_1", limit: 5 },
+    fetchImpl
+  );
+  assert.equal(new URL(calls[0]!.url).pathname, "/v1/automations/auto_1/versions");
+  assert.equal(new URL(calls[0]!.url).searchParams.get("publication_id"), "pub_demo");
+  assert.equal(new URL(calls[0]!.url).searchParams.get("limit"), "5");
+  assert.match(
+    (readJsonRpcResult(list).content as Array<{ text: string }>)[0]!.text,
+    /v2 \(live\)/
+  );
+
+  const one = await callTool(
+    "automation.version",
+    { publication_id: "pub_demo", automation_id: "auto_1", version: 1 },
+    fetchImpl
+  );
+  assert.equal(new URL(calls[1]!.url).pathname, "/v1/automations/auto_1/versions/1");
+  assert.equal(new URL(calls[1]!.url).searchParams.get("publication_id"), "pub_demo");
+  assert.match(
+    (readJsonRpcResult(one).content as Array<{ text: string }>)[0]!.text,
+    /v1.*1 step/
+  );
+});
+
+test("event_definition.update forwards an explicit schema_json null and omits an absent one", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return restOk({ object: "event_definition", id: "evtdef_1", name: "order.placed" });
+  };
+
+  await callTool(
+    "event_definition.update",
+    { publication_id: "pub_demo", definition_id: "evtdef_1", schema_json: null },
+    fetchImpl
+  );
+  const cleared = JSON.parse(String(calls[0]!.init?.body)) as Record<string, unknown>;
+  assert.ok("schema_json" in cleared);
+  assert.equal(cleared.schema_json, null);
+
+  await callTool(
+    "event_definition.update",
+    { publication_id: "pub_demo", definition_id: "evtdef_1", description: "Checkout completed" },
+    fetchImpl
+  );
+  const untouched = JSON.parse(String(calls[1]!.init?.body)) as Record<string, unknown>;
+  // The server keys off hasOwnProperty, so sending null here would wipe a schema
+  // the caller never mentioned.
+  assert.ok(!("schema_json" in untouched));
+  assert.equal(untouched.description, "Checkout completed");
+});
+
+test("event_definition.delete hits the delete route and says what survives", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return restOk({ object: "event_definition", id: "evtdef_1", deleted: true });
+  };
+
+  const response = await callTool(
+    "event_definition.delete",
+    { publication_id: "pub_demo", definition_id: "evtdef_1" },
+    fetchImpl
+  );
+
+  assert.equal(new URL(calls[0]!.url).pathname, "/v1/event-definitions/evtdef_1");
+  assert.equal(calls[0]!.init?.method, "DELETE");
+  assert.equal(new URL(calls[0]!.url).searchParams.get("publication_id"), "pub_demo");
+  const content = readJsonRpcResult(response).content as Array<{ text: string }>;
+  assert.match(content[0]!.text, /auto/);
+});
+
+test("event_definition write tools describe schema_json as the Mailtea document, not JSON Schema", async () => {
+  const response = await handleMcpRequest({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/list",
+    params: {}
+  });
+  const tools = readJsonRpcResult(response).tools as Array<{
+    name: string;
+    description: string;
+  }>;
+
+  for (const name of ["event_definition.create", "event_definition.update"]) {
+    const tool = tools.find((candidate) => candidate.name === name);
+    assert.ok(tool, `${name} missing`);
+    assert.match(tool!.description, /NOT JSON Schema/);
+    assert.match(tool!.description, /additional_properties/);
+  }
 });
