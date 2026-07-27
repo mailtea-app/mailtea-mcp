@@ -481,6 +481,73 @@ const AUTOMATION_SNAKE_CASE_HELP =
  */
 const EVENT_SCHEMA_DOCUMENT_HELP = `schema_json is a Mailtea event schema document, NOT JSON Schema: the reflex attempt {"type": "object", "properties": {...}, "required": [...]} is refused with invalid_event_schema (Unknown schema key "type", Unknown schema key "required") — "type" and "required" belong on each PROPERTY, never at the top level. The only top-level keys are "properties" (an object keyed by property name, max 200) and "additional_properties" (boolean, DEFAULT TRUE — a schema documents what it knows about without closing the payload; set it false to reject undeclared keys). Each declared property accepts only {type?, required?, description?}: "type" is one of string, number, boolean, object, array, null — or an ARRAY of those, the same shape event_definition.get returns in inferred_properties; "required" is a boolean; "description" is a string. Example: {"properties": {"plan": {"type": "string", "required": true, "description": "Plan the contact bought"}, "seats": {"type": ["number", "null"]}}, "additional_properties": false}.`;
 
+/**
+ * The `editor_doc` vocabulary, inlined into both template write tools.
+ *
+ * `format: "editor"` is the format the Visual Email Designer writes, and an
+ * agent can only reach it if the schema says so — the whole point of this
+ * surface is that a template authored by an agent and one designed by an
+ * operator are the same row. The node list is deliberately concrete: a TipTap
+ * document is structurally uniform, so an agent that only knows "pass a doc"
+ * guesses node types that render to nothing and gets an empty email.
+ *
+ * Described in prose rather than as a nested `oneOf` per node type, for the same
+ * reason `AUTOMATION_STEPS_SCHEMA` keeps `config` flat: MCP clients vary in how
+ * much JSON Schema they honour, and discriminated unions are where they break.
+ */
+const EDITOR_DOC_HELP = `editor_doc is a TipTap/ProseMirror document — {"type":"doc","content":[ ...block nodes ]} — and the server renders the email HTML from it and stores that, so do NOT send html alongside it. Every node is {"type":"...","attrs":{...},"content":[...]}. Block nodes that render: paragraph, heading (attrs.level 1-6), bulletList / orderedList / listItem, blockquote, horizontalRule, image (attrs.src, attrs.alt), button (attrs.href, attrs.variant "filled"|"outline", attrs.alignment "left"|"center"|"right", attrs.fullWidth), spacer (attrs.height "sm"|"md"|"lg"|"xl"), table, twoColumns / threeColumns / fourColumns each wrapping columnsColumn children, linkCard, logo, footer, htmlCodeBlock, section. Text is {"type":"text","text":"..."} carrying optional marks: bold, italic, underline, strike, code, sub, sup, textStyle, and link (attrs.href). A "subtitle" string on the doc root becomes the inbox preview text. Minimal example: {"type":"doc","content":[{"type":"heading","attrs":{"level":1},"content":[{"type":"text","text":"Hello"}]},{"type":"paragraph","content":[{"type":"text","text":"Welcome aboard."}]}]}. These node types render to NOTHING in email and their content is lost: youtube, xPost, threadsPost, codeBlock (use htmlCodeBlock for raw HTML); repeat and showIfKey render their content once, without the repetition or the condition. A document that renders to an empty email is refused with 400 editor_doc_unrenderable, and the response names the offending types in node_types. Bounds: 512 KB serialized, 256 KB per string, 40 levels deep.`;
+
+/**
+ * `editor_doc` plus the fidelity sidecars that `html` alone cannot carry. Shared
+ * verbatim by `template.create` and `template.update` so the two can never
+ * advertise different fields for the same column set.
+ */
+const TEMPLATE_EDITOR_PROPERTIES = {
+  editor_doc: {
+    type: "object",
+    description:
+      'Visual Email Designer document, {"type":"doc","content":[...]}. Use INSTEAD OF html/spec — the server renders and stores the email HTML from it. See the tool description for the node vocabulary.',
+    properties: {
+      type: { type: "string", description: 'Always "doc".' },
+      content: {
+        type: "array",
+        description: "Ordered block nodes. Must not be empty.",
+        items: { type: "object" }
+      },
+      subtitle: { type: "string", description: "Inbox preview text (preheader)." }
+    },
+    required: ["type", "content"]
+  },
+  style_profile: {
+    type: "object",
+    description:
+      "Colors, fonts and widths the design renders against: fontFamily, bodyBackground, cardBackground, textColor, headingColor, accentColor, textOnAccentColor, secondaryColor, linkColor, titleFontSizePx, bodyFontSizePx, borderRadiusPx, contentWidthPx, contentPaddingPx. Omit for the default profile."
+  },
+  mailtea_theme: {
+    type: "object",
+    description:
+      "Editor theme stored alongside the design so reopening it in the Visual Email Designer is lossless. Nothing to author by hand — pass back what template.get returned."
+  },
+  global_css: {
+    type: "string",
+    description: "Custom CSS applied to the rendered email."
+  },
+  category: {
+    type: "string",
+    description: "Gallery category, max 80 chars. Library metadata; does not affect rendering."
+  },
+  preview_image_url: {
+    type: "string",
+    description: "Thumbnail shown in the template gallery, max 2048 chars."
+  },
+  tags: {
+    type: "array",
+    items: { type: "string" },
+    description:
+      "Gallery tags for filtering the template library. Max 50, each 1-60 chars. NOT contact tags — these never reach a contact."
+  }
+} as const;
+
 // `config` is deliberately a flat `{ type: "object" }` rather than a discriminated
 // oneOf: MCP clients vary in how much JSON Schema they honour, and unions are
 // exactly where they break. The per-type shape lives in the description instead.
@@ -1753,22 +1820,23 @@ export const MCP_TOOLS = [
   },
   {
     name: "template.create",
-    description: "Create an email template. Provide html (raw HTML) or spec (json-render spec). Spec is recommended — the platform renders email-safe HTML server-side. Available spec components: Html, Head, Body, Container, Section, Row, Column, Heading, Text, Link, Button, Image, Hr, Preview, Markdown, MailteaHeader, MailteaFooter, MailteaSpacer, MailteaContentBlock.",
+    description: `Create an email template. Exactly ONE content source: editor_doc, spec, or html. editor_doc (format "editor") is the same designed template the Visual Email Designer produces and the one to reach for when composing a real email — ${EDITOR_DOC_HELP} spec (format "spec") is the programmatic alternative for generated layouts; available components: Html, Head, Body, Container, Section, Row, Column, Heading, Text, Link, Button, Image, Hr, Preview, Markdown, MailteaHeader, MailteaFooter, MailteaSpacer, MailteaContentBlock. html (format "html") stores raw HTML verbatim. Whichever you use, the stored html is what every send reads, so a template is sendable from all three. Templates start as draft — call template.publish before an automation or issue can use one.`,
     inputSchema: {
       type: "object",
       properties: {
         publicationId: { type: "string", description: "Publication to create template in" },
         name: { type: "string", description: "Template name (max 120 chars)" },
-        html: { type: "string", description: "Raw HTML content (use this OR spec)" },
+        html: { type: "string", description: "Raw HTML content (use this OR spec OR editor_doc)" },
         spec: {
           type: "object",
-          description: "json-render spec (flat element map). Use this OR html.",
+          description: "json-render spec (flat element map). Use this OR html OR editor_doc.",
           properties: {
             root: { type: "string" },
             elements: { type: "object" }
           },
           required: ["root", "elements"]
         },
+        ...TEMPLATE_EDITOR_PROPERTIES,
         description: { type: "string", description: "Template description (max 500 chars)" },
         text: { type: "string", description: "Plain-text body." },
         subject: { type: "string", description: "Default email subject line" },
@@ -1805,7 +1873,8 @@ export const MCP_TOOLS = [
   },
   {
     name: "template.get",
-    description: "Get a single email template by ID, including its spec and rendered HTML",
+    description:
+      'Get a single email template by ID, including its rendered html, its spec, and — for format "editor" — the editor_doc design source plus style_profile, mailtea_theme and global_css. This is the read half of editing a designed template: get it, change the doc, send it back through template.update. template.list omits all of those (a page of full documents would be a very different response size) and returns only category, preview_image_url and tags alongside the summary.',
     inputSchema: {
       type: "object",
       properties: {
@@ -1817,20 +1886,40 @@ export const MCP_TOOLS = [
   },
   {
     name: "template.update",
-    description:
-      "Update an email template. Pass only the fields to change. Providing spec re-renders email-safe HTML server-side; providing html switches the template to raw HTML.",
+    description: `Update an email template. Pass only the fields to change. Providing spec re-renders email-safe HTML server-side; providing html switches the template to raw HTML; providing editor_doc switches it to format "editor" and re-renders. ${EDITOR_DOC_HELP} Sending html for a template that is ALREADY format "editor" is refused with 400 editor_template_html_not_accepted — its html is derived, and accepting raw html would orphan the design source; send editor_doc instead. The sidecars are sticky: a patch carrying only editor_doc keeps the stored style_profile / mailtea_theme / global_css, and a patch carrying only a sidecar re-bakes the html from the STORED doc, so the rendered email never drifts from the stored styling. Call template.get first to read the current editor_doc.`,
     inputSchema: {
       type: "object",
       properties: {
         publicationId: { type: "string" },
         templateId: { type: "string" },
         name: { type: "string" },
-        html: { type: "string", description: "Raw HTML content (switches the template to raw HTML)." },
+        html: { type: "string", description: "Raw HTML content (switches the template to raw HTML). Refused for a template that is already format \"editor\"." },
         spec: {
           type: "object",
           description: "json-render spec (flat element map). Re-renders email-safe HTML server-side.",
           properties: { root: { type: "string" }, elements: { type: "object" } },
           required: ["root", "elements"]
+        },
+        ...TEMPLATE_EDITOR_PROPERTIES,
+        // The library metadata is clearable, so it is three-state here where it
+        // is two-state on create: omit to leave alone, null to clear.
+        global_css: {
+          type: ["string", "null"],
+          description: "Custom CSS applied to the rendered email, or null to clear it."
+        },
+        category: {
+          type: ["string", "null"],
+          description: "Gallery category (max 80 chars), or null to clear it."
+        },
+        preview_image_url: {
+          type: ["string", "null"],
+          description: "Gallery thumbnail (max 2048 chars), or null to clear it."
+        },
+        tags: {
+          type: ["array", "null"],
+          items: { type: "string" },
+          description:
+            "Gallery tags (max 50, each 1-60 chars), or null to clear them. NOT contact tags."
         },
         description: { type: "string" },
         text: { type: "string", description: "Plain-text body." },
@@ -1855,7 +1944,21 @@ export const MCP_TOOLS = [
   },
   {
     name: "template.publish",
-    description: "Publish a draft email template, making it the active version for sends.",
+    description:
+      "Publish a draft email template, making it the active version for sends. Only a published template can seed an issue, a post, or an automation's send_email step. Reversible with template.unpublish.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" },
+        templateId: { type: "string" }
+      },
+      required: ["publicationId", "templateId"]
+    }
+  },
+  {
+    name: "template.unpublish",
+    description:
+      "Return a published email template to draft, taking it out of circulation without deleting it. The body is untouched and published_at is kept as history — only sendability is retracted, so anything that seeds from this template stops finding it. Unpublishing a template that is already a draft is a no-op, not an error, and template.publish puts it back.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3320,6 +3423,52 @@ function readOptionalJsonObject(
   }
 
   return value as Record<string, unknown>;
+}
+
+/**
+ * Three-state counterpart to `asOptionalString`; see `readNullableNumber`.
+ *
+ * `asOptionalString` folds null, undefined and "" all into undefined, which is
+ * right for a create but wrong for a patch: "omit" and "clear" are different
+ * instructions and only null means the second.
+ */
+function readNullableString(
+  args: Record<string, unknown>,
+  key: string
+): string | null | undefined {
+  if (args[key] === null) {
+    return null;
+  }
+
+  return asOptionalString(args[key]);
+}
+
+function readOptionalStringArray(
+  args: Record<string, unknown>,
+  key: string
+): string[] | undefined {
+  const value = args[key];
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new Error(`Argument ${key} must be an array of strings`);
+  }
+
+  return value as string[];
+}
+
+/** Three-state counterpart to `readOptionalStringArray`; see `readNullableNumber`. */
+function readNullableStringArray(
+  args: Record<string, unknown>,
+  key: string
+): string[] | null | undefined {
+  if (args[key] === null) {
+    return null;
+  }
+
+  return readOptionalStringArray(args, key);
 }
 
 /** Three-state counterpart to `readOptionalJsonObject`; see `readNullableNumber`. */
@@ -5120,6 +5269,13 @@ async function runTool(
     const name = readRequiredString(args, "name");
     const html = asOptionalString(args.html);
     const spec = args.spec as Record<string, unknown> | undefined;
+    const editorDoc = readOptionalJsonObject(args, "editor_doc");
+    const styleProfile = readOptionalJsonObject(args, "style_profile");
+    const mailteaTheme = readOptionalJsonObject(args, "mailtea_theme");
+    const globalCss = asOptionalString(args.global_css);
+    const category = asOptionalString(args.category);
+    const previewImageUrl = asOptionalString(args.preview_image_url);
+    const tags = readOptionalStringArray(args, "tags");
     const description = asOptionalString(args.description);
     const text = asOptionalString(args.text);
     const subject = asOptionalString(args.subject);
@@ -5127,8 +5283,15 @@ async function runTool(
     const replyTo = asOptionalString(args.reply_to);
     const variables = args.variables as Array<{ key: string; type: string; fallback_value?: unknown }> | undefined;
 
-    if (!html && !spec) {
-      throw new Error("Either 'html' or 'spec' must be provided");
+    if (!html && !spec && !editorDoc) {
+      throw new Error("One of 'editor_doc', 'spec' or 'html' must be provided");
+    }
+    // The server would silently ignore the html rather than reject it, so the
+    // caller would never learn that the email they get is not the one they sent.
+    if (editorDoc && html) {
+      throw new Error(
+        "'editor_doc' templates render their own HTML server-side — send 'editor_doc' without 'html'"
+      );
     }
 
     const body: Record<string, unknown> = {
@@ -5136,6 +5299,13 @@ async function runTool(
       name,
       ...(html ? { html } : {}),
       ...(spec ? { spec } : {}),
+      ...(editorDoc ? { editor_doc: editorDoc } : {}),
+      ...(styleProfile ? { style_profile: styleProfile } : {}),
+      ...(mailteaTheme ? { mailtea_theme: mailteaTheme } : {}),
+      ...(globalCss ? { global_css: globalCss } : {}),
+      ...(category ? { category } : {}),
+      ...(previewImageUrl ? { preview_image_url: previewImageUrl } : {}),
+      ...(tags ? { tags } : {}),
       ...(description ? { description } : {}),
       ...(text ? { text } : {}),
       ...(subject ? { subject } : {}),
@@ -5200,6 +5370,14 @@ async function runTool(
     const name = asOptionalString(args.name);
     const html = asOptionalString(args.html);
     const spec = args.spec as Record<string, unknown> | undefined;
+    const editorDoc = readOptionalJsonObject(args, "editor_doc");
+    const styleProfile = readOptionalJsonObject(args, "style_profile");
+    const mailteaTheme = readOptionalJsonObject(args, "mailtea_theme");
+    // Three-state: undefined leaves the stored value alone, null clears it.
+    const globalCss = readNullableString(args, "global_css");
+    const category = readNullableString(args, "category");
+    const previewImageUrl = readNullableString(args, "preview_image_url");
+    const tags = readNullableStringArray(args, "tags");
     const description = asOptionalString(args.description);
     const text = asOptionalString(args.text);
     const subject = asOptionalString(args.subject);
@@ -5207,10 +5385,23 @@ async function runTool(
     const replyTo = asOptionalString(args.reply_to);
     const variables = args.variables as Array<{ key: string; type: string; fallback_value?: unknown }> | undefined;
 
+    if (editorDoc && html) {
+      throw new Error(
+        "'editor_doc' templates render their own HTML server-side — send 'editor_doc' without 'html'"
+      );
+    }
+
     const body: Record<string, unknown> = {
       ...(name ? { name } : {}),
       ...(html ? { html } : {}),
       ...(spec ? { spec } : {}),
+      ...(editorDoc ? { editor_doc: editorDoc } : {}),
+      ...(styleProfile ? { style_profile: styleProfile } : {}),
+      ...(mailteaTheme ? { mailtea_theme: mailteaTheme } : {}),
+      ...(globalCss === undefined ? {} : { global_css: globalCss }),
+      ...(category === undefined ? {} : { category }),
+      ...(previewImageUrl === undefined ? {} : { preview_image_url: previewImageUrl }),
+      ...(tags === undefined ? {} : { tags }),
       ...(description ? { description } : {}),
       ...(text ? { text } : {}),
       ...(subject ? { subject } : {}),
@@ -5241,6 +5432,20 @@ async function runTool(
     );
 
     return makeToolResult(`Template published: ${template.id} (${template.status})`, { template });
+  }
+
+  if (toolName === "template.unpublish") {
+    const publicationId = readRequiredString(args, "publicationId");
+    const templateId = readRequiredString(args, "templateId");
+
+    const template = await callRestApi<Record<string, unknown>>(
+      "POST",
+      `/v1/templates/${encodeURIComponent(templateId)}/unpublish?publication_id=${encodeURIComponent(publicationId)}`,
+      undefined,
+      options
+    );
+
+    return makeToolResult(`Template unpublished: ${template.id} (${template.status})`, { template });
   }
 
   if (toolName === "template.duplicate") {

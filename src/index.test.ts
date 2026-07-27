@@ -3349,11 +3349,89 @@ test("tools/list includes the finalise verbs (template/email/issue)", async () =
   const response = await handleMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
   const tools = (readJsonRpcResult(response).tools as Array<{ name: string }>).map((t) => t.name);
   for (const name of [
-    "template.update", "template.publish", "template.duplicate", "template.delete",
+    "template.update", "template.publish", "template.unpublish",
+    "template.duplicate", "template.delete",
     "email.resend", "issue.publish_to_web", "issue.unpublish_from_web"
   ]) {
     assert.ok(tools.includes(name), `missing tool ${name}`);
   }
+});
+
+// --- the editor-doc path must be DISCOVERABLE ------------------------------
+//
+// An agent only ever knows what the inputSchema and the description advertise.
+// `format: "editor"` is the format the Visual Email Designer writes, so if these
+// assertions ever go quiet, agents silently lose the ability to author a
+// designed template and fall back to raw html.
+
+test("template.create/update advertise editor_doc and its sidecars", async () => {
+  const response = await handleMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+  const tools = readJsonRpcResult(response).tools as Array<{
+    name: string;
+    description: string;
+    inputSchema: { properties: Record<string, { type?: unknown; items?: unknown }> };
+  }>;
+
+  for (const name of ["template.create", "template.update"]) {
+    const tool = tools.find((t) => t.name === name);
+    assert.ok(tool, `missing tool ${name}`);
+    for (const field of [
+      "editor_doc",
+      "style_profile",
+      "mailtea_theme",
+      "global_css",
+      "category",
+      "preview_image_url",
+      "tags"
+    ]) {
+      assert.ok(tool.inputSchema.properties[field], `${name} does not advertise ${field}`);
+    }
+    // Naming the shape and the failure is what makes the path usable without
+    // reading our source.
+    assert.match(tool.description, /"type":"doc"/);
+    assert.match(tool.description, /editor_doc_unrenderable/);
+    assert.match(tool.description, /youtube/, "the lossy node types must be named");
+  }
+});
+
+// Discriminated unions are exactly where MCP clients break — the automations
+// sweep learned this and kept step `config` a flat object. The editor document
+// is described in prose for the same reason, and this pins it.
+test("no template tool schema uses a discriminated union", async () => {
+  const response = await handleMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+  const tools = readJsonRpcResult(response).tools as Array<{ name: string; inputSchema: unknown }>;
+
+  for (const tool of tools.filter((t) => t.name.startsWith("template."))) {
+    const serialized = JSON.stringify(tool.inputSchema);
+    for (const keyword of ['"oneOf"', '"anyOf"', '"allOf"', '"discriminator"']) {
+      assert.ok(
+        !serialized.includes(keyword),
+        `${tool.name} inputSchema uses ${keyword}`
+      );
+    }
+  }
+});
+
+// The three metadata fields are clearable, so update advertises them as
+// nullable where create does not. A schema that says plain "string" makes a
+// validating client reject the only value that means "clear this".
+test("template.update advertises the clearable fields as nullable", async () => {
+  const response = await handleMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+  const tools = readJsonRpcResult(response).tools as Array<{
+    name: string;
+    inputSchema: { properties: Record<string, { type?: unknown }> };
+  }>;
+
+  const update = tools.find((t) => t.name === "template.update");
+  assert.ok(update);
+  for (const field of ["global_css", "category", "preview_image_url"]) {
+    assert.deepEqual(update.inputSchema.properties[field]?.type, ["string", "null"], field);
+  }
+  assert.deepEqual(update.inputSchema.properties.tags?.type, ["array", "null"]);
+
+  const create = tools.find((t) => t.name === "template.create");
+  assert.ok(create);
+  assert.equal(create.inputSchema.properties.global_css?.type, "string");
 });
 
 // --- template.create / template.list must NOT use a trailing slash --------
@@ -3410,6 +3488,214 @@ test("template.publish POSTs /v1/templates/:id/publish", async () => {
   assert.equal(url.pathname, "/v1/templates/tmpl_1/publish");
   assert.equal(url.searchParams.get("publication_id"), "pub_1");
   assert.equal(calls[0]!.init?.method, "POST");
+});
+
+test("template.unpublish POSTs /v1/templates/:id/unpublish", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return restOk({ id: "tmpl_1", status: "draft" });
+  };
+  const response = await callTool(
+    "template.unpublish",
+    { publicationId: "pub_1", templateId: "tmpl_1" },
+    fetchImpl
+  );
+  const url = new URL(calls[0]!.url);
+  assert.equal(url.pathname, "/v1/templates/tmpl_1/unpublish");
+  assert.equal(url.searchParams.get("publication_id"), "pub_1");
+  assert.equal(calls[0]!.init?.method, "POST");
+  assert.equal(calls[0]!.init?.body, undefined, "unpublish carries no body");
+
+  const content = readJsonRpcResult(response).content as Array<{ text: string }>;
+  assert.match(content[0]!.text, /Template unpublished: tmpl_1 \(draft\)/);
+});
+
+// --- the editor-doc path, end to end -------------------------------------
+
+const EDITOR_DOC = {
+  type: "doc",
+  content: [
+    { type: "heading", attrs: { level: 1 }, content: [{ type: "text", text: "Hello" }] },
+    { type: "paragraph", content: [{ type: "text", text: "Welcome aboard." }] }
+  ]
+};
+
+test("template.create forwards editor_doc, its sidecars and the library metadata", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return restOk({ id: "tmpl_1", format: "editor" });
+  };
+  const response = await callTool(
+    "template.create",
+    {
+      publicationId: "pub_1",
+      name: "Designed",
+      editor_doc: EDITOR_DOC,
+      style_profile: { textColor: "#111111" },
+      mailtea_theme: { mode: "light" },
+      global_css: ".x{color:red}",
+      category: "Newsletter",
+      preview_image_url: "https://cdn.acme.com/p.png",
+      tags: ["welcome", "onboarding"]
+    },
+    fetchImpl
+  );
+  assert.equal(new URL(calls[0]!.url).pathname, "/v1/templates");
+  // No `html`: the server renders it from the doc, and a planted html would
+  // never match the stored design.
+  assert.deepEqual(JSON.parse(String(calls[0]!.init?.body)), {
+    publication_id: "pub_1",
+    name: "Designed",
+    editor_doc: EDITOR_DOC,
+    style_profile: { textColor: "#111111" },
+    mailtea_theme: { mode: "light" },
+    global_css: ".x{color:red}",
+    category: "Newsletter",
+    preview_image_url: "https://cdn.acme.com/p.png",
+    tags: ["welcome", "onboarding"]
+  });
+
+  const content = readJsonRpcResult(response).content as Array<{ text: string }>;
+  assert.match(content[0]!.text, /Template created: tmpl_1 \(editor\)/);
+});
+
+test("template.create refuses editor_doc together with html, without calling the API", async () => {
+  const response = await handleMcpRequest(
+    {
+      jsonrpc: "2.0",
+      id: 99,
+      method: "tools/call",
+      params: {
+        name: "template.create",
+        arguments: {
+          publicationId: "pub_1",
+          name: "Designed",
+          editor_doc: EDITOR_DOC,
+          html: "<p>planted</p>"
+        }
+      }
+    },
+    {
+      apiBaseUrl: "http://localhost:8787",
+      token: "pat_test_token",
+      fetchImpl: async () => {
+        throw new Error("fetch should not be called for invalid input");
+      }
+    }
+  );
+
+  assert.ok(response.error);
+  assert.match(response.error.message, /send 'editor_doc' without 'html'/);
+});
+
+test("template.create still requires one content source, now naming all three", async () => {
+  const response = await handleMcpRequest(
+    {
+      jsonrpc: "2.0",
+      id: 99,
+      method: "tools/call",
+      params: { name: "template.create", arguments: { publicationId: "pub_1", name: "Empty" } }
+    },
+    {
+      apiBaseUrl: "http://localhost:8787",
+      token: "pat_test_token",
+      fetchImpl: async () => {
+        throw new Error("fetch should not be called for invalid input");
+      }
+    }
+  );
+
+  assert.ok(response.error);
+  assert.equal(
+    response.error.message,
+    "One of 'editor_doc', 'spec' or 'html' must be provided"
+  );
+});
+
+test("template.update forwards editor_doc alone, leaving the stored sidecars untouched", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return restOk({ id: "tmpl_1", format: "editor" });
+  };
+  await callTool(
+    "template.update",
+    { publicationId: "pub_1", templateId: "tmpl_1", editor_doc: EDITOR_DOC },
+    fetchImpl
+  );
+  assert.equal(new URL(calls[0]!.url).pathname, "/v1/templates/tmpl_1");
+  assert.deepEqual(JSON.parse(String(calls[0]!.init?.body)), { editor_doc: EDITOR_DOC });
+});
+
+// "Omit" and "clear" are different instructions, and only an explicit null means
+// the second. `asOptionalString` folds null into undefined, which is why the
+// update handler reads these three-state.
+test("template.update sends explicit nulls for the clearable library fields", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return restOk({ id: "tmpl_1" });
+  };
+  await callTool(
+    "template.update",
+    {
+      publicationId: "pub_1",
+      templateId: "tmpl_1",
+      global_css: null,
+      category: null,
+      preview_image_url: null,
+      tags: null
+    },
+    fetchImpl
+  );
+  assert.deepEqual(JSON.parse(String(calls[0]!.init?.body)), {
+    global_css: null,
+    category: null,
+    preview_image_url: null,
+    tags: null
+  });
+});
+
+test("template.update omits the clearable fields entirely when they are not passed", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return restOk({ id: "tmpl_1" });
+  };
+  await callTool(
+    "template.update",
+    { publicationId: "pub_1", templateId: "tmpl_1", name: "Renamed" },
+    fetchImpl
+  );
+  assert.deepEqual(JSON.parse(String(calls[0]!.init?.body)), { name: "Renamed" });
+});
+
+test("template.create rejects a non-object editor_doc and a non-string tag", async () => {
+  const badArgs: Array<[Record<string, unknown>, RegExp]> = [
+    [{ publicationId: "p", name: "n", editor_doc: "not an object" }, /must be a JSON object/],
+    [{ publicationId: "p", name: "n", editor_doc: EDITOR_DOC, tags: ["ok", 7] }, /must be an array of strings/]
+  ];
+  for (const [args, expected] of badArgs) {
+    const response = await handleMcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 99,
+        method: "tools/call",
+        params: { name: "template.create", arguments: args }
+      },
+      {
+        apiBaseUrl: "http://localhost:8787",
+        token: "pat_test_token",
+        fetchImpl: async () => {
+          throw new Error("fetch should not be called for invalid input");
+        }
+      }
+    );
+    assert.ok(response.error, JSON.stringify(args));
+    assert.match(response.error.message, expected);
+  }
 });
 
 test("template.duplicate POSTs /v1/templates/:id/duplicate", async () => {
