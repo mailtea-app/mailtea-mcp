@@ -1969,6 +1969,42 @@ export const MCP_TOOLS = [
     }
   },
   {
+    name: "template.versions",
+    description:
+      "List an email template's design history, newest first. Metadata only — one version row carries a whole design document, so the list returns version (integer), origin (\"edit\" | \"publish\" | \"restore\"), restored_from_version, format, name, sealed, is_current, created_at, updated_at and author (or null), never the document itself. is_current marks the design the template is serving RIGHT NOW, which is not always the newest entry: a metadata-only update (renaming, retagging) touches the template without recording a version. The reply also carries retention: { max_versions, coalesce_window_seconds } — only the newest max_versions per template are kept, and consecutive edits by the SAME author inside the coalesce window collapse into one entry, so this is a history of saved designs, not a keystroke log. Feed a version number to template.restore_version to put that design back.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" },
+        templateId: { type: "string" },
+        limit: {
+          type: "number",
+          description:
+            "Max entries (positive integer). Omit for the full retained history; the server caps this at the retention maximum reported in retention.max_versions."
+        }
+      },
+      required: ["publicationId", "templateId"]
+    }
+  },
+  {
+    name: "template.restore_version",
+    description:
+      "Put an older design from template.versions back onto the template. READ THIS BEFORE CALLING IT ON A LIVE TEMPLATE: restoring is a content write, so the template RETURNS TO DRAFT — automations, issues and the API STOP sending it until template.publish is called again. Restore a published template and its sends stop until you re-publish; the response's unpublished boolean reports whether that just happened, and re-publishing is the caller's job. History is FORWARD-ONLY — a restore never rewinds, truncates or reorders the list. It first records the design it is about to replace as its own version, then appends the restored design as the new newest version, so a restore is itself undoable: restore the entry directly above the one you just restored. Restoring the design that is already current is a no-op — nothing is written, the template stays published, and the reply is restored: false with reason \"identical\" and unpublished: false. Only the newest versions are kept (see retention on template.versions) and consecutive edits by the same author inside the coalesce window collapse into one entry, so a version can age out of history: asking for one that has returns 404 with code template_version_not_found. Returns { restored, restored_from_version, unpublished, message, template }.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" },
+        templateId: { type: "string" },
+        version: {
+          type: "number",
+          description:
+            "Version number to restore (a positive integer), as returned by template.versions."
+        }
+      },
+      required: ["publicationId", "templateId", "version"]
+    }
+  },
+  {
     name: "template.duplicate",
     description: "Duplicate an email template into a new draft copy.",
     inputSchema: {
@@ -5454,6 +5490,76 @@ async function runTool(
     );
 
     return makeToolResult(`Template unpublished: ${template.id} (${template.status})`, { template });
+  }
+
+  if (toolName === "template.versions") {
+    const publicationId = readRequiredString(args, "publicationId");
+    const templateId = readRequiredString(args, "templateId");
+    const limit = readOptionalNumber(args, "limit");
+
+    const result = await callRestApi<{
+      data: Array<Record<string, unknown>>;
+      retention: { max_versions: number; coalesce_window_seconds: number };
+    }>(
+      "GET",
+      withQuery(`/v1/templates/${encodeURIComponent(templateId)}/versions`, {
+        publication_id: publicationId,
+        limit
+      }),
+      undefined,
+      options
+    );
+
+    const lines = result.data.map((version) => {
+      const author = version.author as { name?: string; email?: string } | null;
+      const who = author?.name ?? author?.email ?? "unknown";
+      return `v${version.version}${version.is_current ? " (current)" : ""}: ${version.origin} by ${who} at ${version.created_at}`;
+    });
+    return makeToolResult(
+      result.data.length > 0
+        ? `${result.data.length} version(s):\n${lines.join("\n")}`
+        : "No versions found",
+      result
+    );
+  }
+
+  if (toolName === "template.restore_version") {
+    const publicationId = readRequiredString(args, "publicationId");
+    const templateId = readRequiredString(args, "templateId");
+    const version = readOptionalNumber(args, "version");
+    if (version === undefined) {
+      throw new Error("Missing required number argument: version");
+    }
+
+    const result = await callRestApi<{
+      restored: boolean;
+      restored_from_version?: number;
+      reason?: string;
+      unpublished: boolean;
+      message: string;
+      template: Record<string, unknown>;
+    }>(
+      "POST",
+      withQuery(
+        `/v1/templates/${encodeURIComponent(templateId)}/versions/${encodeURIComponent(String(version))}/restore`,
+        { publication_id: publicationId }
+      ),
+      undefined,
+      options
+    );
+
+    // The unpublish is the part a caller most needs to hear about, so it is said
+    // in the summary line as well as reported in the structured `unpublished`.
+    return makeToolResult(
+      result.restored
+        ? `Restored version ${version} onto template ${templateId}. The design it replaced was kept as its own version, so this restore can be undone by restoring the entry above it.${
+            result.unpublished
+              ? " The template is now a DRAFT — automations and the API have STOPPED sending it until template.publish is called again."
+              : ""
+          }`
+        : `Nothing restored: ${result.message}`,
+      result
+    );
   }
 
   if (toolName === "template.duplicate") {

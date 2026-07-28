@@ -22,7 +22,7 @@ The server defaults to the Mailtea cloud API. Self-hosting or running locally? A
 - `email.inbound_*` — received email: `inbound_list`, `inbound_get`, `inbound_list_attachments`, `inbound_get_attachment`, `inbound_reply` (auto-threaded; only `inbound_list` needs publicationId)
 - `auth.*`
 - `issue.*` — newsletter drafts + sends to the whole list, plus `publish_to_web` / `unpublish_from_web`
-- `template.*` — reusable email templates: `create`, `list`, `get`, `update`, `publish`, `duplicate`, `delete`
+- `template.*` — reusable email templates: `create`, `list`, `get`, `update`, `publish`, `duplicate`, `delete`, plus `versions` / `restore_version` (a restore is a content write, so it returns the template to draft)
 - `publication.*`
 - `domain.*` — sending domains: add, read DNS records, verify, then send from it
 - `contact.*` — incl. `get`, `delete`, `get_properties`, `set_properties`

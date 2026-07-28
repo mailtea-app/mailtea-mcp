@@ -3511,6 +3511,111 @@ test("template.unpublish POSTs /v1/templates/:id/unpublish", async () => {
   assert.match(content[0]!.text, /Template unpublished: tmpl_1 \(draft\)/);
 });
 
+test("template.versions GETs /v1/templates/:id/versions and forwards limit", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return restOk({
+      object: "list",
+      data: [
+        {
+          id: "etv_2",
+          version: 2,
+          origin: "edit",
+          restored_from_version: null,
+          format: "editor",
+          name: "Weekly digest",
+          sealed: true,
+          is_current: true,
+          created_at: "2026-07-28T10:00:00.000Z",
+          updated_at: "2026-07-28T10:09:00.000Z",
+          author: { id: "usr_1", name: "Dave", email: "d@x.com", image: null }
+        }
+      ],
+      retention: { max_versions: 50, coalesce_window_seconds: 600 }
+    });
+  };
+  const response = await callTool(
+    "template.versions",
+    { publicationId: "pub_1", templateId: "tmpl_1", limit: 10 },
+    fetchImpl
+  );
+  const url = new URL(calls[0]!.url);
+  assert.equal(url.pathname, "/v1/templates/tmpl_1/versions");
+  assert.equal(url.searchParams.get("publication_id"), "pub_1");
+  assert.equal(url.searchParams.get("limit"), "10");
+  assert.equal(calls[0]!.init?.method, "GET");
+
+  const content = readJsonRpcResult(response).content as Array<{ text: string }>;
+  assert.match(content[0]!.text, /v2 \(current\): edit by Dave/);
+});
+
+// A restore returns the template to draft, and an agent that reads only the
+// summary line must still learn that its sends have stopped.
+test("template.restore_version POSTs the restore route and says it unpublished", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return restOk({
+      restored: true,
+      restored_from_version: 3,
+      unpublished: true,
+      message: "Restored version 3.",
+      template: { id: "tmpl_1", status: "draft" }
+    });
+  };
+  const response = await callTool(
+    "template.restore_version",
+    { publicationId: "pub_1", templateId: "tmpl_1", version: 3 },
+    fetchImpl
+  );
+  const url = new URL(calls[0]!.url);
+  assert.equal(url.pathname, "/v1/templates/tmpl_1/versions/3/restore");
+  assert.equal(url.searchParams.get("publication_id"), "pub_1");
+  assert.equal(calls[0]!.init?.method, "POST");
+  assert.equal(calls[0]!.init?.body, undefined, "restore carries no body");
+
+  const content = readJsonRpcResult(response).content as Array<{ text: string }>;
+  assert.match(content[0]!.text, /now a DRAFT/);
+  assert.match(content[0]!.text, /STOPPED sending/);
+});
+
+test("template.restore_version reports an identical version as nothing restored", async () => {
+  const fetchImpl: typeof fetch = async () =>
+    restOk({
+      restored: false,
+      reason: "identical",
+      unpublished: false,
+      message: "Version 3 is already the current design, so nothing was changed.",
+      template: { id: "tmpl_1", status: "published" }
+    });
+  const response = await callTool(
+    "template.restore_version",
+    { publicationId: "pub_1", templateId: "tmpl_1", version: 3 },
+    fetchImpl
+  );
+  const content = readJsonRpcResult(response).content as Array<{ text: string }>;
+  assert.match(content[0]!.text, /Nothing restored: Version 3 is already the current design/);
+});
+
+// The unpublish is the whole reason this tool needs a description an agent
+// cannot skim past, so pin that the words are actually advertised.
+test("template.restore_version advertises the unpublish and the forward-only history", async () => {
+  const response = await handleMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+  const tools = readJsonRpcResult(response).tools as Array<{
+    name: string;
+    description: string;
+    inputSchema: { required?: string[] };
+  }>;
+
+  const restore = tools.find((t) => t.name === "template.restore_version");
+  assert.ok(restore, "template.restore_version must be advertised");
+  assert.match(restore.description, /RETURNS TO DRAFT/);
+  assert.match(restore.description, /FORWARD-ONLY/);
+  assert.match(restore.description, /template_version_not_found/);
+  assert.deepEqual(restore.inputSchema.required, ["publicationId", "templateId", "version"]);
+});
+
 // --- the editor-doc path, end to end -------------------------------------
 
 const EDITOR_DOC = {

@@ -2,6 +2,13 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
+## Unreleased
+
+### Added
+
+- **`template.versions`** — a template's design history, newest first: `version`, `origin` (`edit` / `publish` / `restore`), `restored_from_version`, `format`, `name`, `sealed`, `is_current`, timestamps and `author`. Metadata only, because one version row carries a whole design document and a fifty-entry list that shipped them all would be a multi-megabyte response rendered as a column of timestamps. `is_current` is computed against the live template rather than assumed to be the newest entry — a metadata-only update (renaming, retagging) touches the template without recording a version, so "newest" and "current" are not the same claim. The reply carries `retention`: only the newest `max_versions` are kept, and consecutive edits by the same author inside `coalesce_window_seconds` collapse into one entry.
+- **`template.restore_version`** — put an older design back. Its description leads with the consequence, because an agent only discovers what the tool advertises and this one changes sending behaviour: **restoring is a content write, so the template returns to `draft`** — automations and the API STOP sending it until `template.publish` is called again, and the response's `unpublished` reports whether that just happened. The description also states that history is **forward-only** (the design being replaced is recorded as its own version first, then the restored design is appended, so a restore is undone by restoring the entry above it), that restoring the design that is already current writes nothing and returns `restored: false` with `reason: "identical"` rather than silently unpublishing a live template for no change, and that a version aged out of retention returns `404 template_version_not_found`.
+
 ## 0.5.0 (2026-07-28)
 
 ### Changed
