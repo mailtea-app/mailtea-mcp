@@ -3000,7 +3000,12 @@ export const MCP_TOOLS = [
   },
   {
     name: "automation.metrics",
-    description: `Per-step performance for an automation: run totals plus entered/succeeded/failed/skipped/waiting per step, branch splits for condition and wait_for_event, and email counters for send_email. Test runs are excluded. Metrics are keyed by step_key, so renaming a step orphans its history. ${AUTOMATION_SNAKE_CASE_HELP}`,
+    description: `Per-step performance for an automation: run totals plus entered/succeeded/failed/skipped/waiting per step, branch splits for condition and wait_for_event, and email counters for send_email. Test runs are excluded. Metrics are keyed by step_key, so renaming a step orphans its history.
+
+READING THE RESPONSE — three points, each of which otherwise produces a confidently wrong answer:
+- version vs graph_version. \`version\`/\`version_id\` say what the numbers are SCOPED to, and are NULL whenever no \`version\` was passed, because the aggregate then spans every version. \`graph_version\`/\`graph_version_id\` say only which graph supplied the step LABELS (the live version). State the scope from \`version\`, and say "all versions" when it is null — quoting \`graph_version\` as the scope captions combined v1+v2 traffic as a single version.
+- \`steps[]\` is keyed on (step_key, step_type), NOT on step_key alone. A key deleted as one step type and later re-added as another appears as two entries with the same \`step_key\` in an all-versions aggregate. Do not merge or de-duplicate them by key; they are different steps.
+- \`email.delivered\` means CURRENTLY delivered — accepted and not subsequently bounced — so delivered + bounced never exceeds sent. It is not a running total of everything ever accepted. ${AUTOMATION_SNAKE_CASE_HELP}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -3008,7 +3013,8 @@ export const MCP_TOOLS = [
         automation_id: { type: "string" },
         version: {
           type: "number",
-          description: "Restrict to one graph version. Omit to aggregate across ALL versions."
+          description:
+            "Restrict to one graph version. Omit to aggregate across ALL versions — the response then reports version: null, since no single version scopes those counts."
         },
         since: { type: "string", description: "ISO 8601 lower bound." },
         until: { type: "string", description: "ISO 8601 upper bound." }
@@ -3039,7 +3045,9 @@ export const MCP_TOOLS = [
   },
   {
     name: "automation_run.get",
-    description: `Get one run in full: the PINNED graph it is executing (not the live one), current step, waiting state, last error, and per-step step_runs. ${AUTOMATION_SNAKE_CASE_HELP}`,
+    description: `Get one run in full: the PINNED graph it is executing (not the live one), current step, waiting state, last error, and per-step step_runs.
+
+A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTER the run itself ended — the run was canceled, archived, or the contact unsubscribed while that step was in flight. Its \`completed_at\` is legitimately later than the run's own, and the side effect really happened (the email was sent and billed), so it is not an error and not a data glitch. The run did not resume, and no automation.step.completed webhook fired for it. ${AUTOMATION_SNAKE_CASE_HELP}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -6634,6 +6642,11 @@ async function runTool(
     const until = asOptionalString(args.until);
 
     const metrics = await callAutomationApi<{
+      // `version` is the SCOPE and is null for an all-versions aggregate;
+      // `graph_version` is only where the labels came from. Summarising from
+      // the wrong one captions combined traffic with a single version number.
+      version?: number | null;
+      graph_version?: number | null;
       runs?: { active?: number; waiting?: number };
       steps?: Array<Record<string, unknown>>;
     }>(
@@ -6648,8 +6661,13 @@ async function runTool(
       options
     );
 
+    // Scope from `version` (null => every version), labels from `graph_version`.
+    const scope =
+      typeof metrics.version === "number"
+        ? `v${metrics.version}`
+        : `all versions${typeof metrics.graph_version === "number" ? `, labels from v${metrics.graph_version}` : ""}`;
     return makeToolResult(
-      `Metrics for ${automationId} (${version === undefined ? "all versions" : `v${version}`}, test runs excluded): ${metrics.runs?.active ?? 0} active, ${metrics.runs?.waiting ?? 0} waiting, ${metrics.steps?.length ?? 0} step(s) reported.`,
+      `Metrics for ${automationId} (${scope}, test runs excluded): ${metrics.runs?.active ?? 0} active, ${metrics.runs?.waiting ?? 0} waiting, ${metrics.steps?.length ?? 0} step(s) reported.`,
       metrics
     );
   }
