@@ -4,6 +4,13 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
 
+### Changed
+
+- **The `tag.*` tools are now `topic.*`** — `topic.create`, `topic.list`, `topic.update`, `topic.delete` — targeting `/v1/topics`. The old `tag.*` names still **dispatch** so an agent holding a cached tool list keeps working, but they are no longer advertised in `tools/list`: two tools with identical descriptions measurably degrades model selection, so the compatibility is deliberately asymmetric (advertise new, accept old).
+- **`mailtea://automations/step-types` renames the audience vocabulary**: step types `topic_add` / `topic_remove` (config key `topic_id`), trigger types `topic.subscribed` / `topic.unsubscribed`, condition field `contact.topics`, validation codes `topic_not_found` / `topic_unverified`. The server accepts the old spellings on write forever and canonicalizes on read.
+- **Webhook event names** offered by `webhook.create` are now `contact.topic_subscribed` / `contact.topic_unsubscribed`.
+- Topic ids keep their `tag_` prefix — opaque and permanent. The `tags` argument on `template.create` / `template.update` and the `tag_name` / `tag_value` filters on `email.list` are a different concept and are **unchanged**.
+
 ### Added
 
 - **`segment_add` and `segment_remove` automation steps.** Both are in the `steps[].type` enum, in the per-type `config` help inlined into every graph-authoring tool description, and in the `mailtea://automations/step-types` resource with `config: { required: ["segment_id"] }` and `side_effecting: true`. They add and remove the enrolled contact from an audience segment, which is now what decides who a send targeting that segment reaches.

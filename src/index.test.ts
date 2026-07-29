@@ -3339,7 +3339,7 @@ test("tools/list includes the new Resend-parity tool groups", async () => {
     "webhook.create", "webhook.list",
     "segment.create", "segment.list",
     "contact_property.create", "contact.get", "contact.set_properties",
-    "tag.create", "api_key.create", "api_key.revoke"
+    "topic.create", "api_key.create", "api_key.revoke"
   ]) {
     assert.ok(tools.includes(name), `missing tool ${name}`);
   }
@@ -4065,29 +4065,29 @@ test("segment.create/get/delete target /v1/segments", async () => {
   assert.equal(del[0]!.init?.method, "DELETE");
 });
 
-test("tag.list/update/delete target /v1/tags", async () => {
+test("topic.list/update/delete target /v1/topics", async () => {
   const list: FetchCall[] = [];
-  await callTool("tag.list", { publicationId: "pub_1" }, async (u, i) => {
+  await callTool("topic.list", { publicationId: "pub_1" }, async (u, i) => {
     list.push({ url: String(u), init: i });
     return restOk({ data: [] });
   });
-  assert.equal(new URL(list[0]!.url).pathname, "/v1/tags");
+  assert.equal(new URL(list[0]!.url).pathname, "/v1/topics");
   assert.equal(list[0]!.init?.method, "GET");
 
   const upd: FetchCall[] = [];
-  await callTool("tag.update", { publicationId: "pub_1", tagId: "tag_1", name: "Renamed" }, async (u, i) => {
+  await callTool("topic.update", { publicationId: "pub_1", topicId: "tag_1", name: "Renamed" }, async (u, i) => {
     upd.push({ url: String(u), init: i });
     return restOk({ id: "tag_1", name: "Renamed" });
   });
-  assert.equal(new URL(upd[0]!.url).pathname, "/v1/tags/tag_1");
+  assert.equal(new URL(upd[0]!.url).pathname, "/v1/topics/tag_1");
   assert.equal(upd[0]!.init?.method, "PATCH");
 
   const del: FetchCall[] = [];
-  await callTool("tag.delete", { publicationId: "pub_1", tagId: "tag_1" }, async (u, i) => {
+  await callTool("topic.delete", { publicationId: "pub_1", topicId: "tag_1" }, async (u, i) => {
     del.push({ url: String(u), init: i });
     return restOk({ id: "tag_1" });
   });
-  assert.equal(new URL(del[0]!.url).pathname, "/v1/tags/tag_1");
+  assert.equal(new URL(del[0]!.url).pathname, "/v1/topics/tag_1");
   assert.equal(del[0]!.init?.method, "DELETE");
 });
 
@@ -4367,18 +4367,18 @@ test("contact.set_properties calls the tRPC mutation with values", async () => {
   });
 });
 
-test("tag.create POSTs /v1/tags with required default_subscription", async () => {
+test("topic.create POSTs /v1/topics with required default_subscription", async () => {
   const calls: FetchCall[] = [];
   const fetchImpl: typeof fetch = async (url, init) => {
     calls.push({ url: String(url), init });
     return restOk({ id: "tag_1", name: "Weekly" });
   };
   await callTool(
-    "tag.create",
+    "topic.create",
     { publicationId: "pub_1", name: "Weekly", default_subscription: "opt_in" },
     fetchImpl
   );
-  assert.equal(new URL(calls[0]!.url).pathname, "/v1/tags");
+  assert.equal(new URL(calls[0]!.url).pathname, "/v1/topics");
   assert.deepEqual(JSON.parse(String(calls[0]!.init?.body)), {
     publication_id: "pub_1",
     name: "Weekly",

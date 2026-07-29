@@ -457,11 +457,11 @@ const DEFAULT_API_BASE_URL = "https://api.mailtea.app";
 
 /** Required/optional `config` keys per step type. Inlined into tool descriptions. */
 const AUTOMATION_STEP_CONFIG_HELP =
-  "Step config by type — trigger: {trigger_type, trigger_key?, filter?}; delay: {duration, unit} (unit: seconds|minutes|hours|days|weeks, max 365 days); condition: {rule}; wait_for_event: {event_name, timeout_seconds, filter?} (max 90 days); send_email: {template_id, sender_id?, subject?, reply_to?, variables?}; tag_add: {tag_id}; tag_remove: {tag_id}; segment_add: {segment_id} (member-list segments only — a segment with a status/query filter is refused with segment_is_filter); segment_remove: {segment_id}; contact_update: {properties}; http_request: {url, method?, headers?, body?, timeout_seconds?}; exit: {reason?}.";
+  "Step config by type — trigger: {trigger_type, trigger_key?, filter?}; delay: {duration, unit} (unit: seconds|minutes|hours|days|weeks, max 365 days); condition: {rule}; wait_for_event: {event_name, timeout_seconds, filter?} (max 90 days); send_email: {template_id, sender_id?, subject?, reply_to?, variables?}; topic_add: {topic_id}; topic_remove: {topic_id}; segment_add: {segment_id} (member-list segments only — a segment with a status/query filter is refused with segment_is_filter); segment_remove: {segment_id}; contact_update: {properties}; http_request: {url, method?, headers?, body?, timeout_seconds?}; exit: {reason?}.";
 
 /** Trigger catalog, inlined into the graph-authoring tool descriptions. */
 const AUTOMATION_TRIGGER_HELP =
-  "Trigger types: contact.created, contact.subscribed, contact.unsubscribed, tag.subscribed, tag.unsubscribed, event, email.opened, email.clicked, email.received — tag.subscribed and tag.unsubscribed take trigger_key = tag id, event takes trigger_key = event name.";
+  "Trigger types: contact.created, contact.subscribed, contact.unsubscribed, topic.subscribed, topic.unsubscribed, event, email.opened, email.clicked, email.received — topic.subscribed and topic.unsubscribed take trigger_key = topic id, event takes trigger_key = event name.";
 
 // Two resources, because they answer different questions and an agent pointed at
 // only the first has to guess the rule node shape — it lives exclusively in the
@@ -544,7 +544,7 @@ const TEMPLATE_EDITOR_PROPERTIES = {
     type: "array",
     items: { type: "string" },
     description:
-      "Gallery tags for filtering the template library. Max 50, each 1-60 chars. NOT contact tags — these never reach a contact."
+      "Gallery tags for filtering the template library. Max 50, each 1-60 chars. NOT audience topics — these never reach a contact."
   }
 } as const;
 
@@ -632,8 +632,8 @@ const AUTOMATION_STEPS_SCHEMA = {
           "condition",
           "wait_for_event",
           "send_email",
-          "tag_add",
-          "tag_remove",
+          "topic_add",
+          "topic_remove",
           "segment_add",
           "segment_remove",
           "contact_update",
@@ -701,14 +701,14 @@ const AUTOMATION_STEP_TYPE_CATALOG = {
       description: "A contact unsubscribes."
     },
     {
-      type: "tag.subscribed",
+      type: "topic.subscribed",
       requires_trigger_key: true,
-      description: "A tag is added to a contact. trigger_key is the tag id."
+      description: "A contact subscribes to a topic. trigger_key is the topic id."
     },
     {
-      type: "tag.unsubscribed",
+      type: "topic.unsubscribed",
       requires_trigger_key: true,
-      description: "A tag is removed from a contact. trigger_key is the tag id."
+      description: "A contact unsubscribes from a topic. trigger_key is the topic id."
     },
     {
       type: "event",
@@ -777,18 +777,18 @@ const AUTOMATION_STEP_TYPE_CATALOG = {
         "Send a published server template. Unresolvable variables fall back to the template's fallback_value, or an empty string when none is declared."
     },
     {
-      type: "tag_add",
-      config: { required: ["tag_id"], optional: [] },
+      type: "topic_add",
+      config: { required: ["topic_id"], optional: [] },
       branches: ["next"],
       side_effecting: true,
-      description: "Add a tag to the enrolled contact."
+      description: "Subscribe the enrolled contact to a topic."
     },
     {
-      type: "tag_remove",
-      config: { required: ["tag_id"], optional: [] },
+      type: "topic_remove",
+      config: { required: ["topic_id"], optional: [] },
       branches: ["next"],
       side_effecting: true,
-      description: "Remove a tag from the enrolled contact."
+      description: "Unsubscribe the enrolled contact from a topic."
     },
     {
       type: "segment_add",
@@ -867,7 +867,7 @@ const AUTOMATION_STEP_TYPE_CATALOG = {
       "contact.status",
       "contact.created_at",
       "contact.unsubscribed_at",
-      "contact.tags",
+      "contact.topics",
       "event.name",
       "event.occurred_at"
     ],
@@ -920,8 +920,8 @@ const AUTOMATION_STEP_TYPE_CATALOG = {
     "template_not_found",
     "template_not_published",
     "template_unverified",
-    "tag_not_found",
-    "tag_unverified",
+    "topic_not_found",
+    "topic_unverified",
     "segment_not_found",
     "segment_unverified",
     "segment_is_filter",
@@ -1991,7 +1991,7 @@ export const MCP_TOOLS = [
           type: ["array", "null"],
           items: { type: "string" },
           description:
-            "Gallery tags (max 50, each 1-60 chars), or null to clear them. NOT contact tags."
+            "Gallery tags (max 50, each 1-60 chars), or null to clear them. NOT audience topics."
         },
         description: { type: "string" },
         text: { type: "string", description: "Plain-text body." },
@@ -2540,7 +2540,7 @@ export const MCP_TOOLS = [
           type: "array",
           items: { type: "string" },
           description:
-            "Event types to subscribe to. One or more of: email.received, email.sent, email.delivered, email.delivery_delayed, email.bounced, email.complained, email.opened, email.clicked, email.failed, email.suppressed, contact.created, contact.updated, contact.deleted, contact.unsubscribed, contact.tag_subscribed, contact.tag_unsubscribed, automation.run.started, automation.run.completed, automation.run.failed, automation.run.exited, automation.step.completed. automation.run.exited is distinct from completed: it means the contact left the journey early (unsubscribed, suppressed, archived) and carries the reason. automation.step.completed fires for side-effecting steps only. contact.tag_subscribed and contact.tag_unsubscribed fire only on a genuine change in effective tag membership, so re-asserting an opt-out tag's default emits nothing."
+            "Event types to subscribe to. One or more of: email.received, email.sent, email.delivered, email.delivery_delayed, email.bounced, email.complained, email.opened, email.clicked, email.failed, email.suppressed, contact.created, contact.updated, contact.deleted, contact.unsubscribed, contact.topic_subscribed, contact.topic_unsubscribed, automation.run.started, automation.run.completed, automation.run.failed, automation.run.exited, automation.step.completed. automation.run.exited is distinct from completed: it means the contact left the journey early (unsubscribed, suppressed, archived) and carries the reason. automation.step.completed fires for side-effecting steps only. contact.topic_subscribed and contact.topic_unsubscribed fire only on a genuine change in effective topic membership, so re-asserting an opt-out topic's default emits nothing."
         }
       },
       required: ["publicationId", "endpoint", "events"]
@@ -2787,11 +2787,11 @@ export const MCP_TOOLS = [
       required: ["publicationId", "contactId", "values"]
     }
   },
-  // --- Tag definitions (REST /v1/tags) -------------------------------------
+  // --- Topic definitions (REST /v1/topics) ---------------------------------
   {
-    name: "tag.create",
+    name: "topic.create",
     description:
-      "Create a tag definition. NOTE: tags cannot yet be assigned to individual contacts via the API — this manages tag definitions only.",
+      "Create a topic definition. NOTE: topics cannot yet be assigned to individual contacts via the API — this manages topic definitions only.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2808,15 +2808,15 @@ export const MCP_TOOLS = [
           type: "string",
           enum: ["public", "private"],
           description:
-            "public = the tag becomes a reader-facing topic (an unsubscribe group) on the preferences page, using its description as the reader-facing copy; private = internal only, never shown to readers."
+            "public = the topic appears on the reader preference page as its own subscription (what the industry calls an unsubscribe group), using its description as the reader-facing copy; private = internal only, never shown to readers."
         }
       },
       required: ["publicationId", "name", "default_subscription"]
     }
   },
   {
-    name: "tag.list",
-    description: "List tag definitions for a publication.",
+    name: "topic.list",
+    description: "List topic definitions for a publication.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2827,13 +2827,13 @@ export const MCP_TOOLS = [
     }
   },
   {
-    name: "tag.update",
-    description: "Update a tag definition's name, description, default subscription, or visibility.",
+    name: "topic.update",
+    description: "Update a topic definition's name, description, default subscription, or visibility.",
     inputSchema: {
       type: "object",
       properties: {
         publicationId: { type: "string" },
-        tagId: { type: "string" },
+        topicId: { type: "string" },
         name: { type: "string" },
         description: { type: "string" },
         default_subscription: {
@@ -2846,22 +2846,22 @@ export const MCP_TOOLS = [
           type: "string",
           enum: ["public", "private"],
           description:
-            "public = the tag becomes a reader-facing topic (an unsubscribe group) on the preferences page, using its description as the reader-facing copy; private = internal only, never shown to readers."
+            "public = the topic appears on the reader preference page as its own subscription (what the industry calls an unsubscribe group), using its description as the reader-facing copy; private = internal only, never shown to readers."
         }
       },
-      required: ["publicationId", "tagId"]
+      required: ["publicationId", "topicId"]
     }
   },
   {
-    name: "tag.delete",
-    description: "Delete a tag definition.",
+    name: "topic.delete",
+    description: "Delete a topic definition.",
     inputSchema: {
       type: "object",
       properties: {
         publicationId: { type: "string" },
-        tagId: { type: "string" }
+        topicId: { type: "string" }
       },
-      required: ["publicationId", "tagId"]
+      required: ["publicationId", "topicId"]
     }
   },
   // --- API keys (REST /v1/api-keys; requires settings:write) ----------------
@@ -6386,8 +6386,8 @@ async function runTool(
     );
   }
 
-  // --- Tag definitions ------------------------------------------------------
-  if (toolName === "tag.create") {
+  // --- Topic definitions ----------------------------------------------------
+  if (toolName === "topic.create") {
     const publicationId = readRequiredString(args, "publicationId");
     const name = readRequiredString(args, "name");
     const defaultSubscription = asOptionalString(args.default_subscription);
@@ -6398,7 +6398,7 @@ async function runTool(
     const visibility = asOptionalString(args.visibility);
     const result = await callRestApi<{ id: string; name: string }>(
       "POST",
-      "/v1/tags",
+      "/v1/topics",
       {
         publication_id: publicationId,
         name,
@@ -6408,33 +6408,33 @@ async function runTool(
       },
       options
     );
-    return makeToolResult(`Tag ${result.name} created (${result.id}).`, result);
+    return makeToolResult(`Topic ${result.name} created (${result.id}).`, result);
   }
 
-  if (toolName === "tag.list") {
+  if (toolName === "topic.list") {
     const publicationId = readRequiredString(args, "publicationId");
     const limit = readOptionalNumber(args, "limit");
     const params = new URLSearchParams({ publication_id: publicationId });
     if (limit !== undefined) params.set("limit", String(limit));
     const result = await callRestApi<{ data: unknown[] }>(
       "GET",
-      `/v1/tags?${params.toString()}`,
+      `/v1/topics?${params.toString()}`,
       undefined,
       options
     );
-    return makeToolResult(`${result.data.length} tag(s).`, result);
+    return makeToolResult(`${result.data.length} topic(s).`, result);
   }
 
-  if (toolName === "tag.update") {
+  if (toolName === "topic.update") {
     const publicationId = readRequiredString(args, "publicationId");
-    const tagId = readRequiredString(args, "tagId");
+    const topicId = readRequiredString(args, "topicId");
     const name = asOptionalString(args.name);
     const description = asOptionalString(args.description);
     const defaultSubscription = asOptionalString(args.default_subscription);
     const visibility = asOptionalString(args.visibility);
     const result = await callRestApi<{ id: string; name: string }>(
       "PATCH",
-      `/v1/tags/${encodeURIComponent(tagId)}?publication_id=${encodeURIComponent(publicationId)}`,
+      `/v1/topics/${encodeURIComponent(topicId)}?publication_id=${encodeURIComponent(publicationId)}`,
       {
         ...(name ? { name } : {}),
         ...(description !== undefined ? { description } : {}),
@@ -6443,19 +6443,19 @@ async function runTool(
       },
       options
     );
-    return makeToolResult(`Tag ${result.id} updated.`, result);
+    return makeToolResult(`Topic ${result.id} updated.`, result);
   }
 
-  if (toolName === "tag.delete") {
+  if (toolName === "topic.delete") {
     const publicationId = readRequiredString(args, "publicationId");
-    const tagId = readRequiredString(args, "tagId");
+    const topicId = readRequiredString(args, "topicId");
     const result = await callRestApi<{ id: string }>(
       "DELETE",
-      `/v1/tags/${encodeURIComponent(tagId)}?publication_id=${encodeURIComponent(publicationId)}`,
+      `/v1/topics/${encodeURIComponent(topicId)}?publication_id=${encodeURIComponent(publicationId)}`,
       undefined,
       options
     );
-    return makeToolResult(`Tag ${result.id} deleted.`, result);
+    return makeToolResult(`Topic ${result.id} deleted.`, result);
   }
 
   // --- API keys (requires settings:write; cannot exceed caller's scopes) ----
