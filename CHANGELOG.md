@@ -4,6 +4,10 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
 
+### Changed
+
+- **`template.create` / `template.update` refuse a variable name that could never substitute.** `variables[].key` now advertises `pattern` `^[A-Za-z_$@][A-Za-z0-9_$@.-]*$` and `maxLength` 50, repeats the rule in its description (several clients drop `pattern` when they flatten a schema for the model), and is checked before the request goes out so the refusal names the offending key instead of arriving as a Zod path. The API refuses these too. Previously `key` was any string up to 50 characters: `2nd name`, `first name` and `first|name` were accepted, stored, and returned by `template.get` looking entirely declared — and then substituted **nowhere**, because a send resolves a variable by path. The template shipped `Hi {2nd name},` to a real inbox. This matters more for an agent than for an operator, who at least sees the chip turn red in the editor; an agent saw a `201` and moved on. Dots still address into send context (`contact.first_name`), and dashes are still legal (`plan-tier` resolves — only dots separate path segments); pipes are not, because `|` is the inline-fallback separator in `{key|fallback}`, so a name containing one is re-read at send time as a shorter, different name.
+
 ### Added
 
 - **`template.versions`** — a template's design history, newest first: `version`, `origin` (`edit` / `publish` / `restore`), `restored_from_version`, `format`, `name`, `sealed`, `is_current`, timestamps and `author`. Metadata only, because one version row carries a whole design document and a fifty-entry list that shipped them all would be a multi-megabyte response rendered as a column of timestamps. `is_current` is computed against the live template rather than assumed to be the newest entry — a metadata-only update (renaming, retagging) touches the template without recording a version, so "newest" and "current" are not the same claim. The reply carries `retention`: only the newest `max_versions` are kept, and consecutive edits by the same author inside `coalesce_window_seconds` collapse into one entry.

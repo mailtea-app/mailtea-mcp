@@ -548,6 +548,69 @@ const TEMPLATE_EDITOR_PROPERTIES = {
   }
 } as const;
 
+/**
+ * What a declared variable may be NAMED.
+ *
+ * A literal, not an import, because `packages/mcp` takes no runtime dependency
+ * on `@mailtea/contracts` — the same arrangement as the automation catalog
+ * above. `template-variable-key-parity.test.ts` asserts this string is byte-
+ * identical to `TEMPLATE_VARIABLE_KEY_PATTERN` there, so the two cannot drift.
+ *
+ * This matters more for an agent than for a person at a keyboard. The server
+ * looks a variable up by path at send time, so `2nd name` or `first|name` is
+ * stored, echoed back by template.get, and then substitutes nowhere — the
+ * braces reach the inbox. An operator would at least see a red chip in the
+ * editor; an agent sees a 200 and moves on. Hence both halves: the `pattern`
+ * below, since a tool only advertises what its schema says, and the local check
+ * in the handler, so the refusal names the offending key instead of arriving as
+ * a Zod path.
+ */
+const TEMPLATE_VARIABLE_KEY_PATTERN = "^[A-Za-z_$@][A-Za-z0-9_$@.-]*$";
+const TEMPLATE_VARIABLE_KEY_MAX_LENGTH = 50;
+const TEMPLATE_VARIABLE_KEY_RE = new RegExp(TEMPLATE_VARIABLE_KEY_PATTERN, "u");
+
+/** Shared by template.create and template.update so they advertise one rule. */
+const TEMPLATE_VARIABLES_SCHEMA = {
+  type: "array",
+  description:
+    "Variables this template declares, each with an optional fallback_value used when a send supplies no value. Declaring one is what lets a send fill it in; an undeclared {{token}} is delivered verbatim.",
+  items: {
+    type: "object",
+    properties: {
+      key: {
+        type: "string",
+        maxLength: TEMPLATE_VARIABLE_KEY_MAX_LENGTH,
+        pattern: TEMPLATE_VARIABLE_KEY_PATTERN,
+        description: `Variable name, pattern ${TEMPLATE_VARIABLE_KEY_PATTERN}, max ${TEMPLATE_VARIABLE_KEY_MAX_LENGTH} chars — letters, numbers, dots, dashes and underscores, starting with a letter, "_", "$" or "@". Dots address into send context ("contact.first_name"). A name outside this shape is refused: it would store fine and then never substitute, delivering its own braces to a subscriber.`
+      },
+      type: { type: "string", enum: ["string", "number"] },
+      fallback_value: {}
+    },
+    required: ["key", "type"]
+  }
+} as const;
+
+/**
+ * Refuse an unusable key before the round trip, naming it.
+ *
+ * The API refuses these too; doing it here as well is what turns a Zod path
+ * like `variables.3.key` into a sentence an agent can act on in one step.
+ */
+function assertTemplateVariableKeys(
+  variables: Array<{ key?: unknown }> | undefined
+): void {
+  if (!variables) return;
+  for (const variable of variables) {
+    const key = variable?.key;
+    if (typeof key === "string" && TEMPLATE_VARIABLE_KEY_RE.test(key.trim())) {
+      if (key.trim().length <= TEMPLATE_VARIABLE_KEY_MAX_LENGTH) continue;
+    }
+    throw new Error(
+      `Invalid variable key ${JSON.stringify(key)} — must match ${TEMPLATE_VARIABLE_KEY_PATTERN} and be at most ${TEMPLATE_VARIABLE_KEY_MAX_LENGTH} characters. A key outside this shape is stored but never substituted, so the template would send "{${String(key)}}" to subscribers as written.`
+    );
+  }
+}
+
 // `config` is deliberately a flat `{ type: "object" }` rather than a discriminated
 // oneOf: MCP clients vary in how much JSON Schema they honour, and unions are
 // exactly where they break. The per-type shape lives in the description instead.
@@ -1842,19 +1905,7 @@ export const MCP_TOOLS = [
         subject: { type: "string", description: "Default email subject line" },
         from: { type: "string", description: "Default sender address." },
         reply_to: { type: "string" },
-        variables: {
-          type: "array",
-          description: "Template variables with fallback values",
-          items: {
-            type: "object",
-            properties: {
-              key: { type: "string" },
-              type: { type: "string", enum: ["string", "number"] },
-              fallback_value: {}
-            },
-            required: ["key", "type"]
-          }
-        }
+        variables: TEMPLATE_VARIABLES_SCHEMA
       },
       required: ["publicationId", "name"]
     }
@@ -1926,18 +1977,7 @@ export const MCP_TOOLS = [
         subject: { type: "string" },
         from: { type: "string", description: "Default sender address." },
         reply_to: { type: "string" },
-        variables: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              key: { type: "string" },
-              type: { type: "string", enum: ["string", "number"] },
-              fallback_value: {}
-            },
-            required: ["key", "type"]
-          }
-        }
+        variables: TEMPLATE_VARIABLES_SCHEMA
       },
       required: ["publicationId", "templateId"]
     }
@@ -5326,6 +5366,7 @@ async function runTool(
     const from = asOptionalString(args.from);
     const replyTo = asOptionalString(args.reply_to);
     const variables = args.variables as Array<{ key: string; type: string; fallback_value?: unknown }> | undefined;
+    assertTemplateVariableKeys(variables);
 
     if (!html && !spec && !editorDoc) {
       throw new Error("One of 'editor_doc', 'spec' or 'html' must be provided");
@@ -5428,6 +5469,7 @@ async function runTool(
     const from = asOptionalString(args.from);
     const replyTo = asOptionalString(args.reply_to);
     const variables = args.variables as Array<{ key: string; type: string; fallback_value?: unknown }> | undefined;
+    assertTemplateVariableKeys(variables);
 
     if (editorDoc && html) {
       throw new Error(
