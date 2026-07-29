@@ -4,6 +4,11 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
 
+### Added
+
+- **`segment_add` and `segment_remove` automation steps.** Both are in the `steps[].type` enum, in the per-type `config` help inlined into every graph-authoring tool description, and in the `mailtea://automations/step-types` resource with `config: { required: ["segment_id"] }` and `side_effecting: true`. They add and remove the enrolled contact from an audience segment, which is now what decides who a send targeting that segment reaches.
+- **The member-list rule is stated in three places on purpose**, because an agent only discovers what the schema advertises and this one is not guessable from the config shape. A segment is a member list (no filter) or a filter (`status_filter` / `query_filter`), never both — so `segment_add` refuses a filter-backed segment with the new `segment_is_filter` code, at save time and again when the step runs. `segment_remove` takes either kind. `segment_not_found` and `segment_unverified` join the published `validation_codes`.
+
 ### Changed
 
 - **`template.create` / `template.update` refuse a variable name that could never substitute.** `variables[].key` now advertises `pattern` `^[A-Za-z_$@][A-Za-z0-9_$@.-]*$` and `maxLength` 50, repeats the rule in its description (several clients drop `pattern` when they flatten a schema for the model), and is checked before the request goes out so the refusal names the offending key instead of arriving as a Zod path. The API refuses these too. Previously `key` was any string up to 50 characters: `2nd name`, `first name` and `first|name` were accepted, stored, and returned by `template.get` looking entirely declared — and then substituted **nowhere**, because a send resolves a variable by path. The template shipped `Hi {2nd name},` to a real inbox. This matters more for an agent than for an operator, who at least sees the chip turn red in the editor; an agent saw a `201` and moved on. Dots still address into send context (`contact.first_name`), and dashes are still legal (`plan-tier` resolves — only dots separate path segments); pipes are not, because `|` is the inline-fallback separator in `{key|fallback}`, so a name containing one is re-read at send time as a shorter, different name.

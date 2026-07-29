@@ -156,7 +156,7 @@ test("resources/list and resources/read expose the automation step-type catalog"
     notes: string[];
   };
 
-  assert.equal(catalog.step_types.length, 10);
+  assert.equal(catalog.step_types.length, 12);
   assert.equal(catalog.trigger_types.length, 9);
   assert.equal(catalog.branches.length, 5);
   assert.equal(catalog.condition.operators.length, 13);

@@ -457,7 +457,7 @@ const DEFAULT_API_BASE_URL = "https://api.mailtea.app";
 
 /** Required/optional `config` keys per step type. Inlined into tool descriptions. */
 const AUTOMATION_STEP_CONFIG_HELP =
-  "Step config by type — trigger: {trigger_type, trigger_key?, filter?}; delay: {duration, unit} (unit: seconds|minutes|hours|days|weeks, max 365 days); condition: {rule}; wait_for_event: {event_name, timeout_seconds, filter?} (max 90 days); send_email: {template_id, sender_id?, subject?, reply_to?, variables?}; tag_add: {tag_id}; tag_remove: {tag_id}; contact_update: {properties}; http_request: {url, method?, headers?, body?, timeout_seconds?}; exit: {reason?}.";
+  "Step config by type — trigger: {trigger_type, trigger_key?, filter?}; delay: {duration, unit} (unit: seconds|minutes|hours|days|weeks, max 365 days); condition: {rule}; wait_for_event: {event_name, timeout_seconds, filter?} (max 90 days); send_email: {template_id, sender_id?, subject?, reply_to?, variables?}; tag_add: {tag_id}; tag_remove: {tag_id}; segment_add: {segment_id} (member-list segments only — a segment with a status/query filter is refused with segment_is_filter); segment_remove: {segment_id}; contact_update: {properties}; http_request: {url, method?, headers?, body?, timeout_seconds?}; exit: {reason?}.";
 
 /** Trigger catalog, inlined into the graph-authoring tool descriptions. */
 const AUTOMATION_TRIGGER_HELP =
@@ -634,6 +634,8 @@ const AUTOMATION_STEPS_SCHEMA = {
           "send_email",
           "tag_add",
           "tag_remove",
+          "segment_add",
+          "segment_remove",
           "contact_update",
           "http_request",
           "exit"
@@ -789,6 +791,22 @@ const AUTOMATION_STEP_TYPE_CATALOG = {
       description: "Remove a tag from the enrolled contact."
     },
     {
+      type: "segment_add",
+      config: { required: ["segment_id"], optional: [] },
+      branches: ["next"],
+      side_effecting: true,
+      description:
+        "Add the enrolled contact to an audience segment. Only a MEMBER-LIST segment accepts this — one with a status_filter or query_filter resolves its audience from that filter instead, and targeting one is refused with segment_is_filter at save time and again when the step runs."
+    },
+    {
+      type: "segment_remove",
+      config: { required: ["segment_id"], optional: [] },
+      branches: ["next"],
+      side_effecting: true,
+      description:
+        "Remove the enrolled contact from an audience segment. Accepts either kind of segment; on a filter-backed one it deletes any stray membership row and changes no audience."
+    },
+    {
       type: "contact_update",
       config: { required: ["properties"], optional: [] },
       branches: ["next"],
@@ -904,6 +922,9 @@ const AUTOMATION_STEP_TYPE_CATALOG = {
     "template_unverified",
     "tag_not_found",
     "tag_unverified",
+    "segment_not_found",
+    "segment_unverified",
+    "segment_is_filter",
     "contact_property_not_found",
     "contact_property_unverified",
     "insecure_http_url",
