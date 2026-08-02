@@ -2,6 +2,16 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
+## Unreleased
+
+### Added
+
+- **Website Builder tools** — `site.get`, `site.pages_list`, `site.page_get`, `site.page_upsert`, `site.apply_ops`, `site.presets_list`, `site.design_brief_get`, `site.design_brief_set`, `site.publish`, `site.discard_draft`, `site.asset_list`. A publication's public website is now designable by an agent: read the site and the operator's design brief, compose pages from the curated Section Library, restyle the 12 theme tokens, preview the draft, and publish when asked. Auth and publication scoping ride the existing bearer token; there is no new scope.
+- **`site.apply_ops` is the one to reach for, and its schema says why.** It applies a batch of declarative ops (`set_theme`, `compose_page`, `insert_section`, `swap_section`, `edit_copy`, `edit_style`, `arrange`) to the site DRAFT and answers with `{applied, skipped:[{opIndex, op, reason, detail}]}` — a partially-applied batch comes back describable instead of as a 400 that discards the ops that did land. The alternative, `site.page_upsert`, writes a whole document through a **total parser that repairs silently**: unknown properties dropped, values clamped, overflow past the 40-section / 50-child / 200-node caps discarded, all behind a success response. Both facts are in the tool descriptions, because an agent only discovers what the schema advertises and a `200` from the second tool is not evidence the document was stored as sent. The 17 skip reasons (`unknown_preset`, `unknown_node`, `unknown_slot_key`, `value_too_long` — refused, never truncated — `page_full`, `bad_token_value`, `cycle`, …) are enumerated in the description so a model can self-correct on the next turn.
+- **The ops vocabulary is spelled out branch by branch** in `site.apply_ops`'s `inputSchema` — seven `anyOf` variants with their own required fields and per-property descriptions, and the 12 theme tokens enumerated with their meanings and ranges — rather than collapsed into a loose "array of objects". `baseVersion` carries the `draftVersion` a batch was composed against; a mismatch is refused with `site draft changed elsewhere` rather than overwriting another tab, device, or agent.
+- **`site.presets_list` returns each preset's `slots` verbatim** — the copy contract. A value slot takes a string under its key; a repeat slot takes a list of item maps and declares its item keys and min/max. Without them an agent has to guess which copy keys a preset accepts, and a wrong guess comes back as `unknown_slot_key` after the write.
+- **The `mailtea-site-builder` agent skill** (`skills/mailtea-site-builder/SKILL.md`) — the document model in one page, the 12 tokens, the workflow protocol (read the design brief and follow it, compose from presets, pass `baseVersion`, preview at `/site/preview`, never publish unasked), the total-parser warning, craft rules, and a constrained-target recipe for cloning the *style* of a reference site onto Mailtea's block system.
+
 ## 0.6.0 (2026-07-29)
 ### Changed
 

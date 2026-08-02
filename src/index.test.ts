@@ -4891,3 +4891,309 @@ test("event_definition write tools describe schema_json as the Mailtea document,
     assert.match(tool!.description, /additional_properties/);
   }
 });
+
+// --- Website Builder --------------------------------------------------------
+
+test("tools/list includes the site builder tools and advertises every op kind", async () => {
+  const response = await handleMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+  const tools = readJsonRpcResult(response).tools as Array<{
+    name: string;
+    description: string;
+    inputSchema: Record<string, unknown>;
+  }>;
+  const names = tools.map((tool) => tool.name);
+
+  for (const name of [
+    "site.get",
+    "site.pages_list",
+    "site.page_get",
+    "site.page_upsert",
+    "site.apply_ops",
+    "site.presets_list",
+    "site.design_brief_get",
+    "site.design_brief_set",
+    "site.publish",
+    "site.discard_draft",
+    "site.asset_list"
+  ]) {
+    assert.ok(names.includes(name), `missing tool ${name}`);
+  }
+
+  // An agent only discovers what the schema advertises, so the ops vocabulary
+  // has to be spelled out branch by branch — a loose `array of object` would
+  // leave the model guessing at the op names.
+  const applyOps = tools.find((tool) => tool.name === "site.apply_ops");
+  assert.ok(applyOps);
+  const properties = (applyOps!.inputSchema as { properties: Record<string, any> }).properties;
+  assert.ok(properties.baseVersion, "baseVersion is part of the write contract");
+  const branches = properties.ops.items.anyOf as Array<{
+    properties: { op: { enum: string[] } };
+  }>;
+  assert.deepEqual(
+    branches.map((branch) => branch.properties.op.enum[0]),
+    [
+      "set_theme",
+      "compose_page",
+      "insert_section",
+      "swap_section",
+      "edit_copy",
+      "edit_style",
+      "arrange"
+    ]
+  );
+  // The 12 theme tokens are enumerated, not left to the model's imagination.
+  const themeTokens = Object.keys(branches[0]!.properties.op ? (branches[0] as any).properties.tokens.properties : {});
+  assert.equal(themeTokens.length, 12);
+  assert.ok(themeTokens.includes("palette.accent"));
+  assert.ok(themeTokens.includes("theme.contentWidthPx"));
+
+  // The two loud warnings the skill depends on.
+  assert.match(applyOps!.description, /READ THE REPORT/);
+  const upsert = tools.find((tool) => tool.name === "site.page_upsert");
+  assert.match(upsert!.description, /silently REPAIRS/);
+  const publish = tools.find((tool) => tool.name === "site.publish");
+  assert.match(publish!.description, /ONLY when the user has explicitly asked/);
+});
+
+test("site.apply_ops forwards ops, pageId and baseVersion, and passes the skip report through", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return trpcOk({
+      report: {
+        applied: 1,
+        skipped: [
+          { opIndex: 1, op: "insert_section", reason: "unknown_preset", detail: 'no section preset "nope"' }
+        ]
+      },
+      draftVersion: 7,
+      pageId: "sitep_home"
+    });
+  };
+
+  const ops = [
+    { op: "insert_section", presetId: "hero-centered", index: 0, copy: { headline: "Hi" } },
+    { op: "insert_section", presetId: "nope", index: 1 }
+  ];
+  const response = await callTool(
+    "site.apply_ops",
+    { publicationId: "pub_demo", pageId: "sitep_home", ops, baseVersion: 6 },
+    fetchImpl
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.url, "http://localhost:8787/trpc/publication.siteApplyOps");
+  assert.equal(calls[0]!.init?.method, "POST");
+  assert.deepEqual(JSON.parse(calls[0]!.init?.body as string), {
+    publicationId: "pub_demo",
+    ops,
+    pageId: "sitep_home",
+    baseVersion: 6
+  });
+
+  const result = readJsonRpcResult(response);
+  const structured = result.structuredContent as {
+    report: { applied: number; skipped: Array<{ reason: string }> };
+    draftVersion: number;
+    pageId: string;
+  };
+  assert.equal(structured.draftVersion, 7);
+  assert.equal(structured.pageId, "sitep_home");
+  assert.deepEqual(structured.report.skipped[0]?.reason, "unknown_preset");
+
+  // The skip has to be visible in the text too — a model that only reads the
+  // summary line must not come away believing the whole batch landed.
+  const content = result.content as Array<{ text: string }>;
+  assert.match(content[0]!.text, /Applied 1\/2/);
+  assert.match(content[0]!.text, /SKIPPED/);
+  assert.match(content[0]!.text, /unknown_preset/);
+});
+
+test("site.apply_ops omits pageId and baseVersion when the caller does not send them", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return trpcOk({ report: { applied: 1, skipped: [] }, draftVersion: 1, pageId: "sitep_home" });
+  };
+
+  const ops = [{ op: "set_theme", tokens: { "palette.accent": "#123456" } }];
+  const response = await callTool("site.apply_ops", { publicationId: "pub_demo", ops }, fetchImpl);
+
+  assert.deepEqual(JSON.parse(calls[0]!.init?.body as string), {
+    publicationId: "pub_demo",
+    ops
+  });
+  const content = readJsonRpcResult(response).content as Array<{ text: string }>;
+  assert.match(content[0]!.text, /Pass draftVersion as baseVersion/);
+});
+
+test("site.get reads the settings query and surfaces the draft design and brief", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return trpcOk({
+      settings: {
+        publicationId: "pub_demo",
+        siteDesign: { marker: "live" },
+        draftSiteDesign: { marker: "draft" },
+        designBrief: "Quiet, editorial, one accent."
+      },
+      hasUnpublishedChanges: true,
+      designBrief: "Quiet, editorial, one accent.",
+      draftVersion: 4
+    });
+  };
+
+  const response = await callTool("site.get", { publicationId: "pub_demo" }, fetchImpl);
+
+  const requestUrl = new URL(calls[0]!.url);
+  assert.equal(requestUrl.pathname, "/trpc/publication.siteSettings");
+  assert.equal(calls[0]!.init?.method, "GET");
+  assert.deepEqual(JSON.parse(requestUrl.searchParams.get("input")!), {
+    publicationId: "pub_demo"
+  });
+
+  const structured = readJsonRpcResult(response).structuredContent as {
+    design: { marker: string };
+    designBrief: string;
+    draftVersion: number;
+  };
+  assert.deepEqual(structured.design, { marker: "draft" }, "draft wins over live");
+  assert.equal(structured.draftVersion, 4);
+  const content = readJsonRpcResult(response).content as Array<{ text: string }>;
+  assert.match(content[0]!.text, /draftVersion 4/);
+  assert.match(content[0]!.text, /design brief set/);
+});
+
+test("site.presets_list reads the preset catalog query", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return trpcOk({
+      presets: [
+        {
+          id: "hero-centered",
+          category: "Hero",
+          name: "Centered hero",
+          description: "Big statement",
+          slots: [{ kind: "value", key: "headline", path: [0], field: "text" }]
+        }
+      ]
+    });
+  };
+
+  const response = await callTool("site.presets_list", { publicationId: "pub_demo" }, fetchImpl);
+
+  assert.equal(new URL(calls[0]!.url).pathname, "/trpc/publication.sitePresets");
+  assert.equal(calls[0]!.init?.method, "GET");
+  const structured = readJsonRpcResult(response).structuredContent as {
+    presets: Array<{ id: string; slots: unknown[] }>;
+  };
+  assert.equal(structured.presets[0]?.id, "hero-centered");
+  assert.equal(structured.presets[0]?.slots.length, 1, "slots pass through verbatim");
+});
+
+test("site.design_brief_get and site.design_brief_set round-trip through siteSettings", async () => {
+  const readCalls: FetchCall[] = [];
+  const readFetch: typeof fetch = async (url, init) => {
+    readCalls.push({ url: String(url), init });
+    return trpcOk({ settings: {}, designBrief: null, draftVersion: 0 });
+  };
+  const empty = await callTool("site.design_brief_get", { publicationId: "pub_demo" }, readFetch);
+  assert.equal(new URL(readCalls[0]!.url).pathname, "/trpc/publication.siteSettings");
+  assert.match(
+    (readJsonRpcResult(empty).content as Array<{ text: string }>)[0]!.text,
+    /No design brief set/
+  );
+
+  const writeCalls: FetchCall[] = [];
+  const writeFetch: typeof fetch = async (url, init) => {
+    writeCalls.push({ url: String(url), init });
+    return trpcOk({ settings: { designBrief: "Warm, serif, generous whitespace." } });
+  };
+  await callTool(
+    "site.design_brief_set",
+    { publicationId: "pub_demo", designBrief: "Warm, serif, generous whitespace." },
+    writeFetch
+  );
+  assert.equal(writeCalls[0]!.url, "http://localhost:8787/trpc/publication.siteSettingsUpdate");
+  assert.deepEqual(JSON.parse(writeCalls[0]!.init?.body as string), {
+    publicationId: "pub_demo",
+    designBrief: "Warm, serif, generous whitespace."
+  });
+
+  // An explicit null clears the brief; it must not be folded into "omitted".
+  const clearCalls: FetchCall[] = [];
+  const clearFetch: typeof fetch = async (url, init) => {
+    clearCalls.push({ url: String(url), init });
+    return trpcOk({ settings: { designBrief: null } });
+  };
+  await callTool(
+    "site.design_brief_set",
+    { publicationId: "pub_demo", designBrief: null },
+    clearFetch
+  );
+  assert.deepEqual(JSON.parse(clearCalls[0]!.init?.body as string), {
+    publicationId: "pub_demo",
+    designBrief: null
+  });
+});
+
+test("site.page_get selects by kind by default and returns the draft document", async () => {
+  const fetchImpl: typeof fetch = async () =>
+    trpcOk({
+      pages: [
+        {
+          id: "sitep_home",
+          publicationId: "pub_demo",
+          kind: "home",
+          status: "published",
+          slug: "home",
+          title: "Home",
+          contentJson: { version: 3, sections: [{ id: "live", type: "section", blocks: [] }] },
+          draftContentJson: { version: 3, sections: [{ id: "draft", type: "section", blocks: [] }] }
+        },
+        {
+          id: "sitep_about",
+          publicationId: "pub_demo",
+          kind: "custom",
+          status: "published",
+          slug: "about",
+          title: "About",
+          contentJson: { version: 3, sections: [] }
+        }
+      ]
+    });
+
+  const home = await callTool("site.page_get", { publicationId: "pub_demo" }, fetchImpl);
+  const homeStructured = readJsonRpcResult(home).structuredContent as {
+    page: { id: string };
+    contentJson: { sections: Array<{ id: string }> };
+  };
+  assert.equal(homeStructured.page.id, "sitep_home");
+  assert.equal(homeStructured.contentJson.sections[0]?.id, "draft", "draft wins over live");
+
+  const about = await callTool(
+    "site.page_get",
+    { publicationId: "pub_demo", slug: "about" },
+    fetchImpl
+  );
+  assert.equal(
+    (readJsonRpcResult(about).structuredContent as { page: { id: string } }).page.id,
+    "sitep_about"
+  );
+
+  const missing = await handleMcpRequest(
+    {
+      jsonrpc: "2.0",
+      id: 99,
+      method: "tools/call",
+      params: { name: "site.page_get", arguments: { publicationId: "pub_demo", slug: "nope" } }
+    },
+    { apiBaseUrl: "http://localhost:8787", token: "pat_test_token", fetchImpl }
+  );
+  // An address that resolves to nothing is the caller's mistake, and the error
+  // names the pages that do exist so the next call can be right.
+  assert.match(String(missing.error?.message), /No site page matching "nope"/);
+  assert.match(String(missing.error?.message), /home:home, custom:about/);
+});

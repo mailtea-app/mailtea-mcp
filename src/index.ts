@@ -443,6 +443,58 @@ type AuthMe = {
   scopes: string[];
 };
 
+/** A row from `publication.sitePages`. `contentJson` is the LIVE document. */
+type SitePageRecord = {
+  id: string;
+  publicationId: string;
+  kind: string;
+  status: string;
+  slug: string;
+  title: string;
+  contentJson: unknown;
+  draftContentJson?: unknown;
+  seoTitle?: string | null;
+  seoDescription?: string | null;
+  seoOgImageUrl?: string | null;
+  updatedAt?: string;
+};
+
+type SiteSettingsRecord = {
+  settings:
+    | (Record<string, unknown> & {
+        siteDesign?: unknown;
+        draftSiteDesign?: unknown;
+        designBrief?: string | null;
+      })
+    | null;
+  hasUnpublishedChanges?: boolean;
+  designBrief: string | null;
+  draftVersion: number;
+};
+
+/**
+ * The site-ops reducer's verdict. `skipped` is the honesty layer — it names
+ * every edit that did NOT apply and why, and it is handed to the model
+ * verbatim, so it must never be summarized away in a tool result.
+ */
+type SiteOpsReportRecord = {
+  applied: number;
+  skipped: Array<{
+    opIndex: number;
+    op: string;
+    reason: string;
+    detail?: string;
+  }>;
+};
+
+type SitePresetRecord = {
+  id: string;
+  category: string;
+  name: string;
+  description: string;
+  slots: Array<Record<string, unknown>>;
+};
+
 type TrpcProcedureType = "query" | "mutation";
 
 // Defaults to Mailtea cloud so `npx mailtea-mcp` works with just a token.
@@ -940,6 +992,226 @@ const AUTOMATION_STEP_TYPE_CATALOG = {
     "There is deliberately no test tool: a test run sends real, billed email. Test runs are excluded from every metric.",
     "Metrics are keyed by step_key, so renaming a step key orphans that step's history.",
     "event.send is idempotent on idempotency_key: a replay returns the ORIGINAL event id with enrolled_automations: 0, resumed_runs: 0, replayed: true. resumed_runs: 0 does not prove the event matched nothing — read the run, not the counter."
+  ]
+} as const;
+
+/**
+ * Website Builder — the document model an agent has to hold in its head before
+ * it writes anything. Kept in one string so every site tool description can
+ * point at the same vocabulary.
+ */
+const SITE_DOC_HELP = `A publication has exactly ONE site, made of pages. A page document is {"version":3,"sections":[...]}; a section is {"id","type":"section","blocks":[...]}. Blocks are discriminated on "type": heading, text, richText, button, link, image, embed, icon, divider, spacer, subscribeForm, contactForm, unsubscribeForm, postHeader, postBody, postCollection, group (children[]), columns (columns[i].blocks[]). Every style/layout property is {"ref":"palette.accent"} (linked to the theme) or {"value":24} (a literal override) — PREFER refs so the site re-themes coherently. Limits: 40 sections/page, 50 children per container, 200 nodes/page. Writes land on the DRAFT; the public site keeps serving the live version until site.publish.`;
+
+/** The 12 theme tokens, mirrored from SITE_THEME_TOKEN_SPECS in @mailtea/contracts. */
+const SITE_THEME_TOKEN_PROPERTIES = {
+  "palette.pageBg": { type: "string", description: "Page background, #rrggbb." },
+  "palette.surfaceBg": { type: "string", description: "Card/band surface background, #rrggbb." },
+  "palette.text": { type: "string", description: "Primary body text, #rrggbb." },
+  "palette.muted": { type: "string", description: "Secondary/muted text, #rrggbb." },
+  "palette.accent": { type: "string", description: "Accent for buttons and links, #rrggbb." },
+  "palette.accentText": { type: "string", description: "Text drawn on top of the accent, #rrggbb." },
+  "palette.border": { type: "string", description: "Hairline border, #rrggbb." },
+  "typography.headingFont": {
+    type: "string",
+    description: "Heading font stack, e.g. \"'Source Serif 4', Georgia, serif\"."
+  },
+  "typography.bodyFont": {
+    type: "string",
+    description: "Body font stack, e.g. \"'Space Grotesk', system-ui, sans-serif\"."
+  },
+  "typography.baseSizePx": { type: "string", description: "Base body size in px (12-22)." },
+  "theme.radiusPx": { type: "string", description: "Corner radius in px (0-48)." },
+  "theme.contentWidthPx": { type: "string", description: "Content column width in px (480-1280)." }
+} as const;
+
+/**
+ * Copy for a preset's slots, keyed by slot key. A value slot takes a string; a
+ * repeat slot takes a list of item maps. site.presets_list is the authority on
+ * which keys a given preset declares.
+ */
+const SITE_COPY_MAP_SCHEMA = {
+  type: "object",
+  description:
+    "Copy for the preset's slots, keyed by slot key (headline, body, ctaLabel, ctaHref, imageSrc, items, …). A value slot takes text; a repeat slot takes a list of item maps. Keys the preset does not declare come back as unknown_slot_key; omitted slots keep the preset's authored placeholder copy.",
+  additionalProperties: {
+    anyOf: [
+      { type: "string" },
+      { type: "array", items: { type: "object", additionalProperties: { type: "string" } } }
+    ]
+  }
+} as const;
+
+/**
+ * One site op, mirrored by hand from `SiteOpSchema` (a zod discriminated union)
+ * in @mailtea/contracts. Agents only discover what the schema advertises, so
+ * every branch is spelled out with its own descriptions rather than collapsed
+ * into a loose bag of optional keys.
+ */
+const SITE_OP_SCHEMA = {
+  anyOf: [
+    {
+      type: "object",
+      description: "set_theme — restyle the whole site: palette, typography, radius, content width.",
+      properties: {
+        op: { type: "string", enum: ["set_theme"] },
+        tokens: {
+          type: "object",
+          description: "Theme tokens to change. Omitted tokens keep their current value.",
+          properties: SITE_THEME_TOKEN_PROPERTIES,
+          additionalProperties: false
+        }
+      },
+      required: ["op", "tokens"]
+    },
+    {
+      type: "object",
+      description:
+        "compose_page — replace the page's sections wholesale. The 'design me a page' op; the page is left untouched if none of the presets resolve.",
+      properties: {
+        op: { type: "string", enum: ["compose_page"] },
+        sections: {
+          type: "array",
+          description: "The page's new sections, top to bottom (1-40).",
+          items: {
+            type: "object",
+            properties: {
+              presetId: {
+                type: "string",
+                description: "Id of a section preset from the curated Section Library (site.presets_list)."
+              },
+              copy: SITE_COPY_MAP_SCHEMA
+            },
+            required: ["presetId"]
+          }
+        }
+      },
+      required: ["op", "sections"]
+    },
+    {
+      type: "object",
+      description: "insert_section — insert one preset section at a position in the page.",
+      properties: {
+        op: { type: "string", enum: ["insert_section"] },
+        presetId: {
+          type: "string",
+          description: "Id of a section preset from the curated Section Library (site.presets_list)."
+        },
+        index: {
+          type: "number",
+          description:
+            "0-based position among the page's sections. Equal to the section count appends."
+        },
+        copy: SITE_COPY_MAP_SCHEMA
+      },
+      required: ["op", "presetId", "index"]
+    },
+    {
+      type: "object",
+      description:
+        "swap_section — replace an existing section with a different preset, carrying its copy across.",
+      properties: {
+        op: { type: "string", enum: ["swap_section"] },
+        sectionId: { type: "string", description: "Id of the section being replaced." },
+        presetId: { type: "string", description: "Preset to swap in." },
+        fromPresetId: {
+          type: "string",
+          description:
+            "Preset the section was originally built from. Pass it when known — copy then transfers exactly, by slot key."
+        }
+      },
+      required: ["op", "sectionId", "presetId"]
+    },
+    {
+      type: "object",
+      description: "edit_copy — rewrite copy on existing nodes, addressed by id.",
+      properties: {
+        op: { type: "string", enum: ["edit_copy"] },
+        edits: {
+          type: "array",
+          description: "1-100 edits. Each must set text, href, or both.",
+          items: {
+            type: "object",
+            properties: {
+              nodeId: {
+                type: "string",
+                description: "Id of an existing node (section or block) in the page document."
+              },
+              text: {
+                type: "string",
+                description:
+                  "New text for the node's primary text field (heading/text → text, button/link → label, image → alt, subscribeForm → headline)."
+              },
+              href: { type: "string", description: "New link target (button, link, image)." }
+            },
+            required: ["nodeId"]
+          }
+        }
+      },
+      required: ["op", "edits"]
+    },
+    {
+      type: "object",
+      description:
+        "edit_style — restyle one node. A property value naming a theme token (e.g. \"palette.accent\") LINKS the property to the theme; anything else becomes a literal override.",
+      properties: {
+        op: { type: "string", enum: ["edit_style"] },
+        nodeId: { type: "string", description: "Id of an existing node in the page document." },
+        style: {
+          type: "object",
+          description:
+            "Text/surface properties: textColor, textOpacityPct, fontFamily, fontSizePx, fontWeight, lineHeightPct, letterSpacingPx, textAlign, textTransform, highlightColor, background.",
+          additionalProperties: {
+            anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }]
+          }
+        },
+        layout: {
+          type: "object",
+          description:
+            "Box properties: paddingTopPx, paddingRightPx, paddingBottomPx, paddingLeftPx, align, widthMode, widthPx, maxWidthPx, gapPx, borderColor, borderWidthPx, radiusPx.",
+          additionalProperties: {
+            anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }]
+          }
+        }
+      },
+      required: ["op", "nodeId"]
+    },
+    {
+      type: "object",
+      description: "arrange — reorder, reparent and delete nodes. Moves apply first, then deletes.",
+      properties: {
+        op: { type: "string", enum: ["arrange"] },
+        moves: {
+          type: "array",
+          description: "Up to 100 moves.",
+          items: {
+            type: "object",
+            properties: {
+              nodeId: {
+                type: "string",
+                description: "Node to move — a section, or a block anywhere in the tree."
+              },
+              parentId: {
+                type: "string",
+                description:
+                  "New parent (section, group, or column id). Omit to reorder within the node's current parent; sections always reorder at page level."
+              },
+              index: {
+                type: "number",
+                description:
+                  "0-based position in the destination list, after the node is removed from its old one."
+              }
+            },
+            required: ["nodeId", "index"]
+          }
+        },
+        deletes: {
+          type: "array",
+          description: "Ids to remove, each with its whole subtree (max 100).",
+          items: { type: "string" }
+        }
+      },
+      required: ["op"]
+    }
   ]
 } as const;
 
@@ -3272,6 +3544,178 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
         definition_id: { type: "string" }
       },
       required: ["publication_id", "definition_id"]
+    }
+  },
+  {
+    name: "site.get",
+    description: `Load the publication's website: settings, the v3 design (theme tokens, navbar, footer), the operator's design brief, and draftVersion. START HERE — the design brief is the operator's standing instruction for how the site should look and MUST be followed, and draftVersion is the token every write passes back as baseVersion. ${SITE_DOC_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" }
+      },
+      required: ["publicationId"]
+    }
+  },
+  {
+    name: "site.pages_list",
+    description:
+      "List the site's pages (id, kind, slug, title, status). kind is one of home, archive, post, custom, unsubscribe, unsubscribe_success — 'post' is the LAYOUT frame wrapped around every published post, not a single post. Reserved system pages are seeded on first call.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" }
+      },
+      required: ["publicationId"]
+    }
+  },
+  {
+    name: "site.page_get",
+    description: `Load one page with its full document, draft-coalesced (what the builder shows, not what the public site serves). Address it by pageId, slug, or kind. Read this before addressing nodes by id in site.apply_ops. ${SITE_DOC_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" },
+        pageId: { type: "string", description: "Page id. Takes precedence over slug and kind." },
+        slug: { type: "string", description: "Page slug, e.g. \"home\"." },
+        kind: {
+          type: "string",
+          enum: ["home", "archive", "post", "custom", "unsubscribe", "unsubscribe_success"],
+          description: "Page kind. Defaults to \"home\" when no pageId or slug is given."
+        }
+      },
+      required: ["publicationId"]
+    }
+  },
+  {
+    name: "site.page_upsert",
+    description: `Create or replace a WHOLE page document. Prefer site.apply_ops for edits — this write goes through a total parser that silently REPAIRS what it cannot accept (clamping values, dropping unknown properties and overflow past the 40-section / 50-child / 200-node caps), so a success response does NOT mean the document was stored as sent. Read the page back with site.page_get and diff it. Note this writes the LIVE row for content ('draft' status keeps a page off the public site), not the draft column. ${SITE_DOC_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" },
+        id: { type: "string", description: "Existing page id. Omit to create a new page." },
+        kind: {
+          type: "string",
+          enum: ["home", "archive", "post", "custom", "unsubscribe", "unsubscribe_success"]
+        },
+        slug: { type: "string" },
+        title: { type: "string" },
+        status: { type: "string", enum: ["draft", "published", "disabled"] },
+        contentJson: {
+          type: "object",
+          description:
+            "The page document: {\"version\":3,\"sections\":[...]}. Omit to leave the stored document untouched."
+        },
+        seoTitle: { type: ["string", "null"] },
+        seoDescription: { type: ["string", "null"] },
+        seoOgImageUrl: { type: ["string", "null"] }
+      },
+      required: ["publicationId", "kind", "slug", "title"]
+    }
+  },
+  {
+    name: "site.apply_ops",
+    description: `Apply a batch of declarative edits to the site DRAFT — the safe way to design a site. Every op is applied in order and answered with a report: {applied, skipped:[{opIndex, op, reason, detail}]}. A 200 with skips is the normal, honest outcome — READ THE REPORT, it is the only place a refused edit is named. Reasons: unknown_preset, unknown_node, unknown_slot_key, unknown_slot_field, copy_shape_mismatch, repeat_out_of_bounds, value_too_long (refused, never truncated), bad_index, page_full, no_design, unknown_token, bad_token_value, unknown_style_prop, empty_edit, not_a_container, cycle, extract_failed, invalid_op. Compose from presets (site.presets_list) rather than hand-authoring blocks. ${SITE_DOC_HELP}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" },
+        pageId: {
+          type: "string",
+          description:
+            "Page the ops edit. Defaults to the home page; the response echoes back which page was written. Ops that need a page when the site has none come back skipped, not as an error."
+        },
+        ops: {
+          type: "array",
+          description: "1-100 ops, applied in order.",
+          items: SITE_OP_SCHEMA
+        },
+        baseVersion: {
+          type: "number",
+          description:
+            "The draftVersion this batch was composed against (from site.get). On a mismatch the write is refused with 'site draft changed elsewhere' — re-read the site and rebuild the batch rather than retrying it blind."
+        }
+      },
+      required: ["publicationId", "ops"]
+    }
+  },
+  {
+    name: "site.presets_list",
+    description:
+      "The curated Section Library: every insertable section preset with its id, category, name, description, and slots. Slots are the contract for copy — a value slot takes a string under its key, a repeat slot takes a list of item maps (its itemSlots name the per-item keys, min/max bound the count). A preset with no slots is a structural scaffold, inserted as authored. Read this before composing with site.apply_ops; a presetId not in this list is skipped as unknown_preset.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" }
+      },
+      required: ["publicationId"]
+    }
+  },
+  {
+    name: "site.design_brief_get",
+    description:
+      "Read the operator's design brief — standing brand and layout guardrails in markdown that every design change must respect. Empty means no brief has been written yet.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" }
+      },
+      required: ["publicationId"]
+    }
+  },
+  {
+    name: "site.design_brief_set",
+    description:
+      "Write the operator's design brief (markdown, max 10000 chars) — the durable record of the site's visual direction, read on every later design turn. Pass null to clear it. Replaces the whole brief: read it first and edit, don't overwrite work you did not author.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" },
+        designBrief: {
+          type: ["string", "null"],
+          description: "Markdown brief, or null to clear."
+        }
+      },
+      required: ["publicationId", "designBrief"]
+    }
+  },
+  {
+    name: "site.publish",
+    description:
+      "Publish the site: promote every pending draft page and the draft design to live, for real visitors. Call this ONLY when the user has explicitly asked to publish — design work belongs on the draft, which the operator previews and approves first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" }
+      },
+      required: ["publicationId"]
+    }
+  },
+  {
+    name: "site.discard_draft",
+    description:
+      "Throw away every unpublished draft edit across the whole site and revert to the live version. Destructive and not undoable — it discards the operator's pending work as well as yours. Confirm with the user first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" }
+      },
+      required: ["publicationId"]
+    }
+  },
+  {
+    name: "site.asset_list",
+    description:
+      "List images in the publication's asset library, newest first, with the absolute URLs to use as an image block's src or a preset's imageSrc slot. Use a real asset instead of inventing an image URL.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" },
+        search: { type: "string", description: "Filter by file name." },
+        limit: { type: "number", description: "Max assets to return (1-200, default 50)." }
+      },
+      required: ["publicationId"]
     }
   }
 ] as const;
@@ -7093,6 +7537,326 @@ async function runTool(
     return makeToolResult(
       `Event definition deleted: ${result.id}. Past events are kept and ingest continues — the next event of this name recreates the definition as source "auto", without the description or schema.`,
       result
+    );
+  }
+
+  // --- Website Builder ------------------------------------------------------
+  // Site tools ride the same bearer token and publication resolution as every
+  // other tRPC-backed tool; there is no site-specific scope.
+
+  if (toolName === "site.get") {
+    const publicationId = readRequiredString(args, "publicationId");
+
+    const site = await callTrpc<SiteSettingsRecord>(
+      "publication.siteSettings",
+      { publicationId },
+      options,
+      "query"
+    );
+
+    // Draft over live: the design an agent edits is the one the operator is
+    // looking at in the builder, not the one visitors currently see.
+    const design = site.settings?.draftSiteDesign ?? site.settings?.siteDesign ?? null;
+    return makeToolResult(
+      `Loaded site for ${publicationId} (draftVersion ${site.draftVersion}${
+        site.hasUnpublishedChanges ? ", unpublished changes pending" : ""
+      }${site.designBrief ? ", design brief set — follow it" : ", no design brief"})`,
+      {
+        publicationId,
+        settings: site.settings,
+        design,
+        designBrief: site.designBrief,
+        draftVersion: site.draftVersion,
+        hasUnpublishedChanges: site.hasUnpublishedChanges ?? false
+      }
+    );
+  }
+
+  if (toolName === "site.pages_list") {
+    const publicationId = readRequiredString(args, "publicationId");
+
+    const result = await callTrpc<{ pages: SitePageRecord[] }>(
+      "publication.sitePages",
+      { publicationId },
+      options,
+      "query"
+    );
+
+    return makeToolResult(
+      `Loaded ${result.pages.length} site pages for ${publicationId}`,
+      {
+        publicationId,
+        // Documents are omitted here — they are large, and site.page_get is the
+        // way to read one.
+        pages: result.pages.map((page) => ({
+          id: page.id,
+          kind: page.kind,
+          slug: page.slug,
+          title: page.title,
+          status: page.status,
+          hasDraft: page.draftContentJson != null
+        }))
+      }
+    );
+  }
+
+  if (toolName === "site.page_get") {
+    const publicationId = readRequiredString(args, "publicationId");
+    const pageId = asOptionalString(args.pageId);
+    const slug = asOptionalString(args.slug);
+    const kind = asOptionalString(args.kind);
+
+    // No single-page procedure exists; the list is small (40 pages max) and
+    // carries both columns, so the selection happens here.
+    const result = await callTrpc<{ pages: SitePageRecord[] }>(
+      "publication.sitePages",
+      { publicationId },
+      options,
+      "query"
+    );
+
+    const page = pageId
+      ? result.pages.find((candidate) => candidate.id === pageId)
+      : slug
+        ? result.pages.find((candidate) => candidate.slug === slug)
+        : result.pages.find((candidate) => candidate.kind === (kind ?? "home"));
+
+    if (!page) {
+      const wanted = pageId ?? slug ?? kind ?? "home";
+      throw new Error(
+        `No site page matching "${wanted}". Available: ${
+          result.pages.map((candidate) => `${candidate.kind}:${candidate.slug}`).join(", ") ||
+          "none"
+        }`
+      );
+    }
+
+    const hasDraft = page.draftContentJson != null;
+    return makeToolResult(
+      `Loaded site page ${page.id} (${page.kind}:${page.slug}, ${
+        hasDraft ? "draft" : "live"
+      } document)`,
+      {
+        publicationId,
+        page: {
+          id: page.id,
+          kind: page.kind,
+          slug: page.slug,
+          title: page.title,
+          status: page.status,
+          hasDraft,
+          seoTitle: page.seoTitle ?? null,
+          seoDescription: page.seoDescription ?? null,
+          seoOgImageUrl: page.seoOgImageUrl ?? null
+        },
+        // Draft-coalesced, matching what the builder and site.apply_ops edit.
+        contentJson: page.draftContentJson ?? page.contentJson
+      }
+    );
+  }
+
+  if (toolName === "site.page_upsert") {
+    const publicationId = readRequiredString(args, "publicationId");
+    const kind = readRequiredString(args, "kind");
+    const slug = readRequiredString(args, "slug");
+    const title = readRequiredString(args, "title");
+    const id = asOptionalString(args.id);
+    const status = asOptionalString(args.status);
+    const contentJson = readOptionalJsonObject(args, "contentJson");
+    const seoTitle = readNullableString(args, "seoTitle");
+    const seoDescription = readNullableString(args, "seoDescription");
+    const seoOgImageUrl = readNullableString(args, "seoOgImageUrl");
+
+    const result = await callTrpc<{ page: SitePageRecord }>(
+      "publication.sitePageUpsert",
+      {
+        publicationId,
+        kind,
+        slug,
+        title,
+        ...(id ? { id } : {}),
+        ...(status ? { status } : {}),
+        ...(contentJson !== undefined ? { contentJson } : {}),
+        ...(seoTitle !== undefined ? { seoTitle } : {}),
+        ...(seoDescription !== undefined ? { seoDescription } : {}),
+        ...(seoOgImageUrl !== undefined ? { seoOgImageUrl } : {})
+      },
+      options
+    );
+
+    return makeToolResult(
+      `Site page saved: ${result.page.id} (${result.page.kind}:${result.page.slug}).${
+        contentJson
+          ? " The server's total parser may have repaired the document silently — read it back with site.page_get and diff before reporting success."
+          : ""
+      }`,
+      { publicationId, page: result.page }
+    );
+  }
+
+  if (toolName === "site.apply_ops") {
+    const publicationId = readRequiredString(args, "publicationId");
+    const pageId = asOptionalString(args.pageId);
+    const ops = readRequiredJsonObjectArray(args, "ops");
+    const baseVersion = readOptionalNumber(args, "baseVersion");
+
+    const result = await callTrpc<{
+      report: SiteOpsReportRecord;
+      draftVersion: number;
+      pageId: string | null;
+    }>(
+      "publication.siteApplyOps",
+      {
+        publicationId,
+        ops,
+        ...(pageId ? { pageId } : {}),
+        ...(baseVersion !== undefined ? { baseVersion } : {})
+      },
+      options
+    );
+
+    const skipped = result.report.skipped;
+    const summary = skipped
+      .map(
+        (skip) =>
+          `op ${skip.opIndex} (${skip.op}): ${skip.reason}${
+            skip.detail ? ` — ${skip.detail}` : ""
+          }`
+      )
+      .join("; ");
+
+    return makeToolResult(
+      skipped.length === 0
+        ? `Applied ${result.report.applied}/${ops.length} ops to the site draft (page ${
+            result.pageId ?? "none"
+          }, draftVersion ${result.draftVersion}). Pass draftVersion as baseVersion on the next write.`
+        : `Applied ${result.report.applied}/${ops.length} ops to the site draft (page ${
+            result.pageId ?? "none"
+          }, draftVersion ${result.draftVersion}). ${skipped.length} SKIPPED — ${summary}`,
+      {
+        publicationId,
+        pageId: result.pageId,
+        draftVersion: result.draftVersion,
+        report: result.report
+      }
+    );
+  }
+
+  if (toolName === "site.presets_list") {
+    const publicationId = readRequiredString(args, "publicationId");
+
+    const result = await callTrpc<{ presets: SitePresetRecord[] }>(
+      "publication.sitePresets",
+      { publicationId },
+      options,
+      "query"
+    );
+
+    return makeToolResult(
+      `Loaded ${result.presets.length} section presets`,
+      { presets: result.presets }
+    );
+  }
+
+  if (toolName === "site.design_brief_get") {
+    const publicationId = readRequiredString(args, "publicationId");
+
+    const site = await callTrpc<SiteSettingsRecord>(
+      "publication.siteSettings",
+      { publicationId },
+      options,
+      "query"
+    );
+
+    return makeToolResult(
+      site.designBrief
+        ? `Design brief for ${publicationId} (${site.designBrief.length} chars) — treat it as binding on every design change`
+        : `No design brief set for ${publicationId}`,
+      { publicationId, designBrief: site.designBrief }
+    );
+  }
+
+  if (toolName === "site.design_brief_set") {
+    const publicationId = readRequiredString(args, "publicationId");
+    // Three-state on purpose: null clears the brief, a string replaces it.
+    const designBrief = readNullableString(args, "designBrief");
+    if (designBrief === undefined) {
+      throw new Error(
+        "Missing required argument: designBrief (a markdown string, or null to clear)"
+      );
+    }
+
+    await callTrpc<{ settings: unknown }>(
+      "publication.siteSettingsUpdate",
+      { publicationId, designBrief },
+      options
+    );
+
+    return makeToolResult(
+      designBrief === null
+        ? `Design brief cleared for ${publicationId}`
+        : `Design brief saved for ${publicationId} (${designBrief.length} chars)`,
+      { publicationId, designBrief }
+    );
+  }
+
+  if (toolName === "site.publish") {
+    const publicationId = readRequiredString(args, "publicationId");
+
+    const result = await callTrpc<{
+      publishedAt: string;
+      draftVersion: number;
+      pages: SitePageRecord[];
+    }>("publication.sitePublish", { publicationId }, options);
+
+    return makeToolResult(
+      `Site published for ${publicationId} at ${result.publishedAt} — the draft is now live (draftVersion ${result.draftVersion})`,
+      {
+        publicationId,
+        publishedAt: result.publishedAt,
+        draftVersion: result.draftVersion,
+        pageCount: result.pages.length
+      }
+    );
+  }
+
+  if (toolName === "site.discard_draft") {
+    const publicationId = readRequiredString(args, "publicationId");
+
+    const result = await callTrpc<{ draftVersion: number; pages: SitePageRecord[] }>(
+      "publication.siteDiscardDraft",
+      { publicationId },
+      options
+    );
+
+    return makeToolResult(
+      `Discarded the site draft for ${publicationId} — every unpublished edit is gone and the live site is unchanged (draftVersion ${result.draftVersion})`,
+      {
+        publicationId,
+        draftVersion: result.draftVersion,
+        revertedPages: result.pages.length
+      }
+    );
+  }
+
+  if (toolName === "site.asset_list") {
+    const publicationId = readRequiredString(args, "publicationId");
+    const search = asOptionalString(args.search);
+    const requestedLimit = readOptionalNumber(args, "limit");
+    const limit = Math.max(1, Math.min(200, Math.trunc(requestedLimit ?? 50)));
+
+    const result = await callTrpc<{ assets: Array<Record<string, unknown>> }>(
+      "publication.siteAssetList",
+      { publicationId, limit, ...(search ? { search } : {}) },
+      options,
+      "query"
+    );
+
+    return makeToolResult(
+      result.assets.length === 0
+        ? `No images in the asset library for ${publicationId}`
+        : `Loaded ${result.assets.length} images from the asset library for ${publicationId}`,
+      { publicationId, assets: result.assets }
     );
   }
 

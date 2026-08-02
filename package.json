@@ -12,7 +12,8 @@
   "files": [
     "dist",
     "bin",
-    "README.md"
+    "README.md",
+    "skills"
   ],
   "keywords": [
     "mailtea",
