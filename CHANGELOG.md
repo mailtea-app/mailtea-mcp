@@ -4,6 +4,11 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
 
+### Changed
+
+- **Marketing tools are refused on a transactional-only plan.** Server-side change, no MCP code change — recorded because it is a new failure mode an agent will meet mid-task. `contact.*`, `contact_property.*`, `segment.*`, `topic.*`, `issue.*`, `analytics.*`, `automation.*`, `automation_run.*`, `monetize.*` and `site.*` now come back as a tool error whose message names the plan and the fix ("…require the Transactional + Marketing plan. Upgrade in Settings → Billing"), rather than an opaque 402 — an agent cannot see an upgrade dialog, so the message has to stand alone. `email.*`, `domain.*`, `event.*`, `event_definition.*`, `template.*`, `api_key.*`, `auth.me` and the inbound tools are unaffected on every plan.
+  **Tool discovery is unchanged**: `tools/list` still advertises every tool regardless of plan, because the server has no billing context at listing time. An agent finds out at call time.
+
 ### Added
 
 - **Website Builder tools** — `site.get`, `site.pages_list`, `site.page_get`, `site.page_upsert`, `site.apply_ops`, `site.presets_list`, `site.design_brief_get`, `site.design_brief_set`, `site.publish`, `site.discard_draft`, `site.asset_list`. A publication's public website is now designable by an agent: read the site and the operator's design brief, compose pages from the curated Section Library, restyle the 12 theme tokens, preview the draft, and publish when asked. Auth and publication scoping ride the existing bearer token; there is no new scope.
