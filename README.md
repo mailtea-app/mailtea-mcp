@@ -14,7 +14,7 @@ claude mcp add mailtea \
 
 Create the token (prefix `mt_pat_`) in **Settings → API keys**, then ask your agent to send an email. It calls `email.send` and the message goes out through Mailtea.
 
-The server defaults to the Mailtea cloud API. Self-hosting or running locally? Add `-e MAILTEA_API_BASE_URL=http://localhost:8787` (and optional `-e MAILTEA_PUBLICATION_ID=pub_demo`).
+The server defaults to the Mailtea cloud API. Self-hosting or running locally? Add `-e MAILTEA_API_BASE_URL=http://localhost:7787` (and optional `-e MAILTEA_PUBLICATION_ID=pub_demo`).
 
 ## Tool families
 
@@ -59,7 +59,7 @@ pnpm --filter mailtea-mcp build
 ## Run locally over stdio
 
 ```bash
-export MAILTEA_API_BASE_URL=http://localhost:8787
+export MAILTEA_API_BASE_URL=http://localhost:7787
 export MAILTEA_API_TOKEN=<BETTER_AUTH_SESSION_OR_PAT_TOKEN>
 export MAILTEA_PUBLICATION_ID=pub_demo
 
@@ -86,7 +86,7 @@ If your MCP client accepts a stdio server definition, this is the minimal patter
       "command": "node",
       "args": ["/absolute/path/to/mailtea/packages/mcp/dist/stdio.js"],
       "env": {
-        "MAILTEA_API_BASE_URL": "http://localhost:8787",
+        "MAILTEA_API_BASE_URL": "http://localhost:7787",
         "MAILTEA_API_TOKEN": "<BETTER_AUTH_SESSION_OR_PAT_TOKEN>",
         "MAILTEA_PUBLICATION_ID": "pub_demo"
       }
@@ -112,7 +112,7 @@ If your client supports remote MCP over HTTP, point it at Mailtea API:
 {
   "mcpServers": {
     "mailtea": {
-      "url": "http://localhost:8787/mcp",
+      "url": "http://localhost:7787/mcp",
       "headers": {
         "Authorization": "Bearer <BETTER_AUTH_SESSION_OR_PAT_TOKEN>"
       }
@@ -130,7 +130,7 @@ Remote MCP is useful when:
 Safe remote smoke:
 
 ```bash
-MAILTEA_API_BASE_URL=http://localhost:8787 \
+MAILTEA_API_BASE_URL=http://localhost:7787 \
 MAILTEA_API_TOKEN=<BETTER_AUTH_SESSION_OR_PAT_TOKEN> \
 pnpm deploy:smoke:mcp
 ```
