@@ -7542,7 +7542,10 @@ async function runTool(
 
   // --- Website Builder ------------------------------------------------------
   // Site tools ride the same bearer token and publication resolution as every
-  // other tRPC-backed tool; there is no site-specific scope.
+  // other tRPC-backed tool. The write tools additionally need the `site:write`
+  // scope and an editor-or-above publication role; the server enforces both, so
+  // there is nothing to check here — a token that lacks either gets
+  // "Insufficient role" back from the tRPC call.
 
   if (toolName === "site.get") {
     const publicationId = readRequiredString(args, "publicationId");

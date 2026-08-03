@@ -331,4 +331,6 @@ Setup, if the MCP server isn't connected yet:
 claude mcp add mailtea -e MAILTEA_API_TOKEN=mt_pat_xxx -- npx -y mailtea-mcp
 ```
 
+The token needs the **`site:write`** scope and an **editor, admin, or owner** role on the publication — a full-access key has both. Reading (`site.get`, `site.pages_list`, `site.presets_list`, `site.asset_list`) needs neither. If a write comes back `Insufficient role`, the token is read-only, send-only, or tied to a viewer-role member: say so and ask the operator for a key with Website Builder access rather than retrying.
+
 Sending email rather than designing the site? Use the `mailtea` skill.
