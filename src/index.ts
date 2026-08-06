@@ -1150,6 +1150,26 @@ const EMAIL_STYLE_TOKEN_PROPERTIES = {
     description:
       "Colour for headings. Often the body colour or a shade darker; a heading in the accent competes with the button for attention."
   },
+  textOnAccentColor: {
+    type: "string",
+    description:
+      "Colour of the label drawn ON the accent — button text. Set it with accentColor: white on a pale accent is unreadable, and this is the only way to fix it."
+  },
+  bodyFontSizePx: {
+    type: "string",
+    description:
+      "Body copy size in px (14-24). 16-18 reads comfortably on a phone; below 14 is refused because it is unreadable in an inbox."
+  },
+  titleFontSizePx: {
+    type: "string",
+    description:
+      "Size of the h1 in px (16-72). Section headings derive from it, so this sets the whole heading scale rather than one heading."
+  },
+  linkDecoration: {
+    type: "string",
+    description:
+      "Whether body links are underlined: `underline` or `none`. Default `none` matches the template corpus, but a link told apart by colour alone fails WCAG 1.4.1 — set `underline` when contrast is the only other cue."
+  },
   fontFamily: {
     type: "string",
     description:
@@ -1513,7 +1533,7 @@ const SITE_OP_SCHEMA = {
  * client that asked was told the wrong number; `version.test.ts` now ties the
  * two together.
  */
-export const SERVER_VERSION = "0.7.0";
+export const SERVER_VERSION = "0.8.0";
 
 export const MCP_TOOLS = [
   {

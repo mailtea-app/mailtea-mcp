@@ -2,6 +2,16 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
+## 0.8.0 (2026-08-06)
+
+- Added: `set_styles` reaches the typography an agent could not state before —
+  `bodyFontSizePx` (14-24), `titleFontSizePx` (16-72, which sets the whole
+  heading scale), `textOnAccentColor` (the label drawn on the button), and
+  `linkDecoration` (`underline` | `none`). Sizes are range-checked rather than
+  clamped, so a refusal names the range instead of silently shipping a size
+  nobody asked for. `linkDecoration` exists because a link told apart by colour
+  alone fails WCAG 1.4.1 and there was no way to fix that from an op.
+
 ## 0.7.0 (2026-08-06)
 
 - Fixed: the server reported `"version": "0.2.0"` in the `initialize`
