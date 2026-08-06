@@ -2,7 +2,12 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
-## Unreleased
+## 0.7.0 (2026-08-06)
+
+- Fixed: the server reported `"version": "0.2.0"` in the `initialize`
+  handshake, and had done through five releases — every client that asked was
+  told something false. It now reports the package version, and a test ties the
+  two together so it cannot drift again.
 - Added: `site.asset_upload` and `site.asset_delete`. Until now `site.asset_list`
   was the only asset tool, so an agent could reference an image that already
   existed and could not add one — which made "design this newsletter, with

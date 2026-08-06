@@ -1504,6 +1504,17 @@ const SITE_OP_SCHEMA = {
   ]
 } as const;
 
+/**
+ * What the server calls itself in the `initialize` handshake.
+ *
+ * Written twice — here and in `package.json` — because importing the manifest
+ * from source would need a JSON import assertion and resolves differently once
+ * bundled to `dist`. It was left at "0.2.0" through five releases, so every
+ * client that asked was told the wrong number; `version.test.ts` now ties the
+ * two together.
+ */
+export const SERVER_VERSION = "0.7.0";
+
 export const MCP_TOOLS = [
   {
     name: "auth.me",
@@ -8554,7 +8565,7 @@ export async function handleMcpRequest(
           protocolVersion: "2025-06-18",
           serverInfo: {
             name: "mailtea-mcp",
-            version: "0.2.0"
+            version: SERVER_VERSION
           },
           capabilities: {
             tools: {},
