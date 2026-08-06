@@ -64,10 +64,35 @@ type IssueEditor = {
   title: string;
   status: string;
   contentJson: Record<string, unknown>;
+  /** Addressable blocks — the paths `issue.apply_ops` takes. */
+  outline: Array<{ path: string; type: string; text?: string }>;
+  styles: Record<string, string>;
+  headers: { subject?: string; previewText?: string };
+  docBacked: boolean;
   createdAt: string;
   updatedAt: string;
   scheduledAt: string | null;
   sentAt: string | null;
+};
+
+type EmailOpsSkipRecord = {
+  opIndex: number;
+  reason: string;
+  path?: string;
+  detail?: string;
+};
+
+type EmailOpsReportRecord = {
+  applied: number;
+  skipped: EmailOpsSkipRecord[];
+  outline?: { blocks: Array<{ path: string; type: string; text?: string }> };
+};
+
+type EmailLintFinding = {
+  slug: string;
+  severity: "fail" | "warn";
+  feature: string;
+  clients: string[];
 };
 
 type IssueDraftRemoveResult = {
@@ -1042,6 +1067,270 @@ const SITE_COPY_MAP_SCHEMA = {
 } as const;
 
 /**
+ * Every email block kind, mirrored by hand from `EMAIL_BLOCK_SPECS` in
+ * @mailtea/contracts. `email-ops-catalog-parity.test.ts` fails if the two drift.
+ *
+ * A block spec is a flat `{kind, ...attrs}` bag rather than a per-kind union for
+ * the same reason `edit_block`'s attrs are flat: MCP clients vary in how much
+ * JSON Schema they honour, and unions are where they break. The per-kind
+ * vocabulary is spelled out in the description instead, because an agent only
+ * discovers what the schema advertises.
+ */
+const EMAIL_BLOCK_SPEC_SCHEMA = {
+  type: "object",
+  description:
+    "One block. `kind` picks the type; the remaining keys are that kind's attributes. " +
+    "heading: text, level (1|2|3). " +
+    "text: text. " +
+    "bulletList / numberedList: items (1-50 strings). " +
+    "quote: text. " +
+    "button: label, href, alignment (left|center|right), variant (filled|outline), fullWidth. " +
+    "image: src (absolute URL), alt, alignment. " +
+    "divider: no attrs. " +
+    "spacer: height (sm|md|lg|xl). " +
+    "columns: columns (2-4 strings, one per column). " +
+    "section: heading, text — a container; fill it with insert_blocks position \"append-into\". " +
+    "footer: text, alignment — fine print and the unsubscribe link. " +
+    "html: html (raw markup, sanitized to email-safe on render; use only when no other block fits). " +
+    "variable: key, fallback, before, after — a personalization token, e.g. \"Hi {contact.first_name},\". " +
+    "Text fields take inline markup: **bold**, *italic*, [label](https://url).",
+  properties: {
+    kind: {
+      type: "string",
+      enum: [
+        "heading",
+        "text",
+        "bulletList",
+        "numberedList",
+        "quote",
+        "button",
+        "image",
+        "divider",
+        "spacer",
+        "columns",
+        "section",
+        "footer",
+        "html",
+        "variable"
+      ]
+    }
+  },
+  required: ["kind"]
+} as const;
+
+/**
+ * The email style tokens, mirrored by hand from `EMAIL_STYLE_TOKEN_SPECS`.
+ * Enumerated rather than a loose record so the model reads the legal names
+ * instead of guessing. Values are strings; the reducer range-checks the numeric
+ * ones and reports `bad_attr_value` rather than silently swapping in a default.
+ */
+const EMAIL_STYLE_TOKEN_PROPERTIES = {
+  pageBackground: {
+    type: "string",
+    description: "Colour behind the email body card, e.g. #f5f4f2."
+  },
+  bodyBackground: {
+    type: "string",
+    description: "The email body card's own background, usually #ffffff."
+  },
+  bodyText: { type: "string", description: "Default body text colour." },
+  bodyBorderColor: { type: "string", description: "Body card border colour." },
+  accentColor: {
+    type: "string",
+    description:
+      "The brand colour: button fill, quote rule, section badges. Text on it is drawn in the profile's on-accent colour, so keep it dark enough for white text."
+  },
+  linkColor: {
+    type: "string",
+    description:
+      "Colour for links in body copy. Keep at least 4.5:1 against the body background — an accent that reads well as a button fill is often too light as link text."
+  },
+  headingColor: {
+    type: "string",
+    description:
+      "Colour for headings. Often the body colour or a shade darker; a heading in the accent competes with the button for attention."
+  },
+  fontFamily: {
+    type: "string",
+    description:
+      "Font stack, e.g. \"'Inter', 'Segoe UI', sans-serif\". Email clients only reliably render web-safe families, so keep a system fallback last."
+  },
+  bodyWidth: {
+    type: "string",
+    description: "Body card width in px (320-900). 600 is the email convention."
+  },
+  bodyPadding: {
+    type: "string",
+    description: "Padding inside the body card, px on all four sides (0-96)."
+  },
+  pagePadding: {
+    type: "string",
+    description: "Padding around the body card, px on all four sides (0-96)."
+  },
+  bodyCornerRadius: { type: "string", description: "Body card corner radius in px (0-48)." },
+  bodyBorder: { type: "string", description: "Body card border width in px (0-8)." }
+} as const;
+
+/**
+ * One email op, mirrored by hand from `EmailOpSchema` (a zod discriminated
+ * union) in @mailtea/contracts, for the same reason as `SITE_OP_SCHEMA` below:
+ * agents only discover what the schema advertises.
+ *
+ * Addresses are dot-joined child-index paths ("2.1" = second child of the third
+ * top-level block), minted by the outline `issue.get_editor` returns. Echo those
+ * back rather than computing them; a path that no longer resolves comes back
+ * skipped as unknown_path or stale_address, with a fresh outline attached.
+ */
+const EMAIL_OP_SCHEMA = {
+  anyOf: [
+    {
+      type: "object",
+      description:
+        "compose — replace the email body wholesale. The only op that works on a draft created with contentHtml/contentSpec, because it never reads the old document.",
+      properties: {
+        op: { type: "string", enum: ["compose"] },
+        blocks: {
+          type: "array",
+          description: "The email's new body, top to bottom. Replaces everything there.",
+          items: EMAIL_BLOCK_SPEC_SCHEMA
+        }
+      },
+      required: ["op", "blocks"]
+    },
+    {
+      type: "object",
+      description: "insert_blocks — add blocks at a position relative to an existing node.",
+      properties: {
+        op: { type: "string", enum: ["insert_blocks"] },
+        blocks: {
+          type: "array",
+          description: "Blocks to insert, in order.",
+          items: EMAIL_BLOCK_SPEC_SCHEMA
+        },
+        path: {
+          type: "string",
+          description:
+            "The node to insert relative to, copied from the outline. Omit to append at the end of the email."
+        },
+        position: {
+          type: "string",
+          enum: ["before", "after", "append-into"],
+          description:
+            'Where the blocks land relative to `path`. "append-into" puts them inside a container (a section, or one column of a columns row) and is refused on anything else. Defaults to "after".'
+        },
+        expectType: {
+          type: "string",
+          description:
+            "The node type you believe `path` addresses. Mismatch is refused as stale_address rather than edited blind."
+        }
+      },
+      required: ["op", "blocks"]
+    },
+    {
+      type: "object",
+      description: "edit_text — rewrite the copy or link target on existing blocks.",
+      properties: {
+        op: { type: "string", enum: ["edit_text"] },
+        edits: {
+          type: "array",
+          description:
+            "Copy edits, applied in order against the document as it was when the batch started.",
+          items: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "The node to rewrite." },
+              text: { type: "string", description: "Replacement copy. Inline markup allowed." },
+              href: {
+                type: "string",
+                description:
+                  "Replacement link target. Only a button (href) or a link card (url) has one; anything else is refused as unknown_attr."
+              },
+              expectType: { type: "string", description: "The node type you believe `path` is." }
+            },
+            required: ["path"]
+          }
+        }
+      },
+      required: ["op", "edits"]
+    },
+    {
+      type: "object",
+      description: "edit_block — patch one block's attributes.",
+      properties: {
+        op: { type: "string", enum: ["edit_block"] },
+        path: { type: "string", description: "The block to restyle." },
+        attrs: {
+          type: "object",
+          description:
+            "Attributes to set, keyed by name. Per node type — heading: level, textAlign; paragraph/footer: textAlign; button: href, variant, alignment, fullWidth, buttonColor, textColor, borderRadius, padding{Top,Right,Bottom,Left}; image: src, alt, alignment, width, height; logo: src, alt, size, width, alignment; spacer: height; htmlCodeBlock: code; linkCard: title, subtitle, description, imageSrc, imageAlt, url, urlTitle, badge; variable: key, fallback; columns rows: stackOnMobile.",
+          additionalProperties: {
+            anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }]
+          }
+        },
+        expectType: { type: "string", description: "The node type you believe `path` is." }
+      },
+      required: ["op", "path", "attrs"]
+    },
+    {
+      type: "object",
+      description: "set_styles — restyle the whole email: colours, font, width, padding.",
+      properties: {
+        op: { type: "string", enum: ["set_styles"] },
+        tokens: {
+          type: "object",
+          description: "Style tokens to change. Omitted tokens keep their current value.",
+          properties: EMAIL_STYLE_TOKEN_PROPERTIES,
+          additionalProperties: false
+        }
+      },
+      required: ["op", "tokens"]
+    },
+    {
+      type: "object",
+      description:
+        "arrange — reorder and delete blocks. Every address resolves against the document as it stood when the batch started; moves run first, then deletes.",
+      properties: {
+        op: { type: "string", enum: ["arrange"] },
+        moves: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              from: { type: "string", description: "The node to move." },
+              to: { type: "string", description: "The node to move it relative to." },
+              position: { type: "string", enum: ["before", "after", "append-into"] },
+              expectType: { type: "string", description: "The node type you believe `from` is." }
+            },
+            required: ["from", "to", "position"]
+          }
+        },
+        deletes: {
+          type: "array",
+          description: "Paths to remove, each with everything inside it. Applied after every move.",
+          items: { type: "string" }
+        }
+      },
+      required: ["op"]
+    },
+    {
+      type: "object",
+      description:
+        "set_headers — set the subject line and the inbox preview text. The subject is the issue's title.",
+      properties: {
+        op: { type: "string", enum: ["set_headers"] },
+        subject: { type: "string", description: "Subject line. Plain text." },
+        previewText: {
+          type: "string",
+          description:
+            "Inbox preview text (the preheader) shown next to the subject. Say something the subject does not."
+        }
+      },
+      required: ["op"]
+    }
+  ]
+} as const;
+
+/**
  * One site op, mirrored by hand from `SiteOpSchema` (a zod discriminated union)
  * in @mailtea/contracts. Agents only discover what the schema advertises, so
  * every branch is spelled out with its own descriptions rather than collapsed
@@ -1251,13 +1540,54 @@ export const MCP_TOOLS = [
   },
   {
     name: "issue.get_editor",
-    description: "Load issue editor payload for a draft or scheduled issue",
+    description:
+      "Load the editor payload for a draft or scheduled issue. Returns `outline` — the document as a flat list of addressable blocks ({path, type, text}) — plus `styles` (current style tokens), `headers` (subject, previewText), `docBacked`, and `updatedAt`. READ THIS BEFORE issue.apply_ops: the paths in the outline are the addresses ops take, and `updatedAt` is what you pass as baseUpdatedAt. `docBacked: false` means the draft holds raw HTML, not an editable document — only a `compose` op can edit it.",
     inputSchema: {
       type: "object",
       properties: {
         issueId: { type: "string" }
       },
       required: ["issueId"]
+    }
+  },
+  {
+    name: "issue.apply_ops",
+    description:
+      "Apply a batch of declarative edits to a draft email — the surgical alternative to issue.update_draft, which replaces the whole document. Use this to change one button's colour, rewrite a paragraph, reorder sections, or restyle the email without regenerating it. Every op is applied in order and answered with a report: {applied, skipped:[{opIndex, reason, path, detail}]}. A success with skips is the normal, honest outcome — READ THE REPORT, it is the only place a refused edit is named. Reasons: invalid_op, unknown_path, stale_address, unknown_block_kind, unknown_attr, bad_attr_value, unknown_style_token, bad_index, not_a_container, cycle, empty_edit, value_too_long (refused, never truncated), doc_full, not_email_safe, out_of_scope, internal_error. A structural op returns a fresh `outline` in the report — use it, every path you held may have moved. Call issue.get_editor first for the outline and updatedAt.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        issueId: { type: "string" },
+        ops: {
+          type: "array",
+          description: "1-100 ops, applied in order.",
+          items: EMAIL_OP_SCHEMA
+        },
+        baseUpdatedAt: {
+          type: "string",
+          description:
+            "The issue's updatedAt when you composed this batch (from issue.get_editor). On a mismatch the write is refused rather than silently overwriting an edit made meanwhile — an operator with the editor open autosaves every 2.5s. Re-read and rebuild the batch instead of retrying blind."
+        }
+      },
+      required: ["issueId", "ops"]
+    }
+  },
+  {
+    name: "email.lint",
+    description:
+      "Check email HTML against the Can I Email support matrix for the clients Mailtea refuses to regress (Apple Mail, Gmail, Outlook desktop). Returns {findings:[{slug, severity, feature, clients}], failCount, warnCount, strictClients, linted}. severity 'fail' means the layout BREAKS when unsupported (flex/grid collapse, absolute positioning, CSS variables, viewport units); 'warn' means it degrades gracefully (a gradient or shadow simply does not paint). Run this after writing an email — you cannot see the rendered result, and this is the check that catches what a preview would have shown you. Pass exactly one of issueId (lint what is saved) or html (lint before you post it).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        issueId: {
+          type: "string",
+          description: "Lint the saved HTML snapshot of this issue."
+        },
+        html: {
+          type: "string",
+          description: "Lint this raw HTML instead. Use before creating or updating a draft."
+        }
+      }
     }
   },
   {
@@ -3707,7 +4037,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
   {
     name: "site.asset_list",
     description:
-      "List images in the publication's asset library, newest first, with the absolute URLs to use as an image block's src or a preset's imageSrc slot. Use a real asset instead of inventing an image URL.",
+      "List images in the publication's asset library, newest first, with the absolute URLs to use as an image block's src or a preset's imageSrc slot. Each entry carries fileName, contentType, byteSize and width/height, so pick by what the image IS rather than by position. Use a real asset instead of inventing an image URL.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3716,6 +4046,48 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
         limit: { type: "number", description: "Max assets to return (1-200, default 50)." }
       },
       required: ["publicationId"]
+    }
+  },
+  {
+    name: "site.asset_upload",
+    description:
+      "Upload an image into the publication's asset library and get back the permanent URL to use as an image block's src. This is the ONLY way to put a picture that is not already in the library into an email, a template, or a site page — an image block needs an absolute URL, and hot-linking somebody else's host breaks the moment they move it. PNG, JPEG, GIF or WebP only, 5 MB max; SVG is refused because a hostile one can run script from our own domain. The bytes must really be the format you declare. Send `width`/`height` when you know them: the editor uses them to reserve space so the layout does not jump.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" },
+        contentType: {
+          type: "string",
+          enum: ["image/png", "image/jpeg", "image/gif", "image/webp"],
+          description: "The image's real MIME type. Checked against the file's magic bytes."
+        },
+        dataBase64: {
+          type: "string",
+          description:
+            "The raw image bytes, base64-encoded, WITHOUT any `data:image/png;base64,` prefix."
+        },
+        fileName: {
+          type: "string",
+          description:
+            "A human-readable name for the library, e.g. `two-doors-hero.png`. Cosmetic — the stored key is always a fresh random id."
+        },
+        width: { type: "number", description: "Pixel width, when known." },
+        height: { type: "number", description: "Pixel height, when known." }
+      },
+      required: ["publicationId", "contentType", "dataBase64"]
+    }
+  },
+  {
+    name: "site.asset_delete",
+    description:
+      "Remove an image from the publication's asset library. The stored file is KEPT and its URL keeps resolving, so images inside already-sent emails do not break — this only hides the asset from the library. Deleting an asset does NOT remove it from any email, template or page that references it; fix those first or they will keep showing it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" },
+        assetId: { type: "string", description: "The asset's id, from site.asset_list." }
+      },
+      required: ["publicationId", "assetId"]
     }
   }
 ] as const;
@@ -4505,7 +4877,94 @@ async function runTool(
       "query"
     );
 
-    return makeToolResult(`Loaded editor state for ${issue.id} (${issue.status})`, { issue });
+    return makeToolResult(
+      `Loaded editor state for ${issue.id} (${issue.status}) — ${issue.outline?.length ?? 0} addressable blocks, updatedAt ${issue.updatedAt}.${
+        issue.docBacked === false
+          ? " This draft holds raw HTML, not an editable document: only a `compose` op can edit it."
+          : ""
+      }`,
+      { issue }
+    );
+  }
+
+  if (toolName === "issue.apply_ops") {
+    const issueId = readRequiredString(args, "issueId");
+    const ops = readRequiredJsonObjectArray(args, "ops");
+    const baseUpdatedAt = asOptionalString(args.baseUpdatedAt);
+
+    const result = await callTrpc<{
+      report: EmailOpsReportRecord;
+      issueId: string;
+      title: string;
+      updatedAt: string;
+    }>(
+      "issue.applyOps",
+      {
+        issueId,
+        ops,
+        ...(baseUpdatedAt ? { baseUpdatedAt } : {})
+      },
+      options
+    );
+
+    const skipped = result.report.skipped ?? [];
+    const summary = skipped
+      .map(
+        (skip) =>
+          `op ${skip.opIndex}: ${skip.reason}${skip.path ? ` at ${skip.path}` : ""}${
+            skip.detail ? ` — ${skip.detail}` : ""
+          }`
+      )
+      .join("; ");
+
+    return makeToolResult(
+      skipped.length === 0
+        ? `Applied ${result.report.applied}/${ops.length} ops to ${result.issueId}. Pass updatedAt ${result.updatedAt} as baseUpdatedAt on the next write.`
+        : `Applied ${result.report.applied}/${ops.length} ops to ${result.issueId} (updatedAt ${result.updatedAt}). ${skipped.length} SKIPPED — ${summary}`,
+      {
+        issueId: result.issueId,
+        title: result.title,
+        updatedAt: result.updatedAt,
+        report: result.report
+      }
+    );
+  }
+
+  if (toolName === "email.lint") {
+    const issueId = asOptionalString(args.issueId);
+    const html = asOptionalString(args.html);
+
+    const result = await callTrpc<{
+      findings: EmailLintFinding[];
+      failCount: number;
+      warnCount: number;
+      strictClients: string[];
+      linted: boolean;
+    }>(
+      "issue.lint",
+      {
+        ...(issueId ? { issueId } : {}),
+        ...(html !== undefined ? { html } : {})
+      },
+      options,
+      "query"
+    );
+
+    const detail = result.findings
+      .map(
+        (finding) =>
+          `${finding.severity === "fail" ? "FAIL" : "warn"} ${finding.feature} — unsupported in ${finding.clients.join(", ")}`
+      )
+      .join("; ");
+
+    return makeToolResult(
+      !result.linted
+        ? "Nothing to lint — this draft has no rendered HTML yet."
+        : result.findings.length === 0
+          ? `Clean: no email-unsafe CSS found for ${result.strictClients.join(", ")}.`
+          : `${result.failCount} failing, ${result.warnCount} warning — ${detail}`,
+      result
+    );
   }
 
   if (toolName === "issue.update_draft") {
@@ -7860,6 +8319,62 @@ async function runTool(
         ? `No images in the asset library for ${publicationId}`
         : `Loaded ${result.assets.length} images from the asset library for ${publicationId}`,
       { publicationId, assets: result.assets }
+    );
+  }
+
+  if (toolName === "site.asset_upload") {
+    const publicationId = readRequiredString(args, "publicationId");
+    const contentType = readRequiredString(args, "contentType");
+    const dataBase64 = readRequiredString(args, "dataBase64");
+    const fileName = asOptionalString(args.fileName);
+    const width = readOptionalNumber(args, "width");
+    const height = readOptionalNumber(args, "height");
+
+    // Strip a data-URL prefix rather than letting the server reject the upload:
+    // pasting `data:image/png;base64,…` is the single most likely way to get
+    // this wrong, and the fix is unambiguous.
+    const comma = dataBase64.indexOf(",");
+    const payload =
+      dataBase64.startsWith("data:") && comma > 0
+        ? dataBase64.slice(comma + 1)
+        : dataBase64;
+
+    const result = await callTrpc<{ url: string; asset: Record<string, unknown> }>(
+      "publication.siteAssetUpload",
+      {
+        publicationId,
+        contentType,
+        dataBase64: payload,
+        ...(fileName ? { fileName } : {}),
+        ...(width !== undefined ? { width: Math.trunc(width) } : {}),
+        ...(height !== undefined ? { height: Math.trunc(height) } : {})
+      },
+      options,
+      "mutation"
+    );
+
+    return makeToolResult(
+      `Uploaded ${fileName ?? "image"} to the asset library. Use this URL as the image block's src: ${result.url}`,
+      { publicationId, url: result.url, asset: result.asset }
+    );
+  }
+
+  if (toolName === "site.asset_delete") {
+    const publicationId = readRequiredString(args, "publicationId");
+    const assetId = readRequiredString(args, "assetId");
+
+    const result = await callTrpc<{ deleted: boolean }>(
+      "publication.siteAssetDelete",
+      { publicationId, assetId },
+      options,
+      "mutation"
+    );
+
+    return makeToolResult(
+      result.deleted
+        ? `Removed ${assetId} from the asset library. Anything already referencing its URL still renders.`
+        : `No asset ${assetId} in ${publicationId}`,
+      { publicationId, assetId, deleted: result.deleted }
     );
   }
 

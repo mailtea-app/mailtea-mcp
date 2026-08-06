@@ -3,6 +3,42 @@
 All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
+- Added: `site.asset_upload` and `site.asset_delete`. Until now `site.asset_list`
+  was the only asset tool, so an agent could reference an image that already
+  existed and could not add one — which made "design this newsletter, with
+  images" impossible over MCP. Upload takes base64 bytes and returns the
+  permanent URL for an image block's `src`. PNG/JPEG/GIF/WebP only, 5 MB max;
+  SVG stays refused (it can carry script and would be served from our own
+  origin), and the bytes are now checked against the declared type, so a
+  mislabelled file is rejected instead of stored. Delete hides an asset from the
+  library but KEEPS the file resolving, so already-sent emails do not break.
+- Changed: `site.asset_list`'s description now names the metadata each entry
+  carries (fileName, contentType, byteSize, width/height) so an agent picks an
+  image by what it is rather than by position in the list.
+- Added: `template.update` now reports `unpublished: true` (with a message) when the
+  write took a published template back to draft. Changing a subject line is a
+  content change, so it stops the sends — the response said nothing about that
+  before, and an agent that did not diff `status` left the operator's template
+  offline. Matches `template.restore_version`, which already reported it.
+- Changed: `issue.apply_ops` `compose` now returns the document wrapped in the
+  editor's root `container`, so the paths in its outline are `0.0`, `0.1`, … and
+  they STAY that way. Previously a fresh draft composed flat and the wrapper
+  appeared the first time a human opened the email, silently shifting every path
+  the agent had been handed a turn earlier. **Read the outline from the response
+  and address by that** — this was always the contract, and now it holds across
+  a human opening the email.
+- Fixed: `set_styles accentColor` now reaches buttons. A button carried a
+  materialized `#000000` from the editor's schema default, which the renderer
+  read as a deliberate per-button colour and preferred over the accent forever.
+  An unset button is now genuinely unset. Buttons that already carry an explicit
+  colour keep it — set one with `edit_block`'s `buttonColor`.
+- Added: `issue.apply_ops` `set_styles` now takes `accentColor`, `linkColor` and
+  `headingColor`. They are the brand: button fill, quote rule and section badges follow the accent,
+  body links follow the link colour. Before this the ten style tokens were all
+  `PageStyle` geometry, so an agent could set the card width and background but
+  every email it composed came out in whatever accent the preset happened to
+  carry — there was no way to state a brand at all. Both are read back by
+  `issue.get_editor` in `styles`, so the read and write vocabularies match.
 
 ### Changed
 
@@ -13,6 +49,12 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ### Added
 
+- **`issue.apply_ops` — surgical edits to a draft email.** Until now the only way for an agent to change an email was `issue.update_draft`, which replaces the whole document: "make the CTA green" meant regenerating the entire email and hoping the rest came back identical. `issue.apply_ops` applies a batch of declarative ops (`compose`, `insert_blocks`, `edit_text`, `edit_block`, `set_styles`, `arrange`, `set_headers`) against the stored document and answers with `{applied, skipped:[{opIndex, reason, path, detail}]}` — a partially-applied batch comes back describable instead of as a 400 that discards the ops that did land. The 16 skip reasons (`unknown_path`, `stale_address`, `unknown_block_kind`, `bad_attr_value`, `value_too_long` — refused, never truncated — `doc_full`, `not_email_safe`, `cycle`, …) are enumerated in the description so a model can self-correct on the next turn. This is the **same reducer the Visual Email Designer's own assistant runs**: `/ai/email/chat` streams these ops to the browser, which owns the live canvas; an agent has no canvas, so the server applies them instead. Both share one implementation precisely so a human's edit and an agent's identical edit cannot diverge.
+- **The ops vocabulary is spelled out branch by branch** in `issue.apply_ops`'s `inputSchema` — seven `anyOf` variants with their own required fields, all 14 block kinds enumerated with their attributes, and the 10 style tokens enumerated with their meanings and ranges — rather than collapsed into a loose "array of objects". Addresses are dot-joined child-index paths minted by the outline (below); echo them back rather than computing them. `baseUpdatedAt` carries the `updatedAt` a batch was composed against; a mismatch is refused rather than silently overwriting an operator who has the editor open and autosaving every 2.5 seconds.
+- **`issue.get_editor` now returns `outline`, `styles`, `headers` and `docBacked`.** The outline is the document as a flat list of addressable blocks (`{path, type, text}`) — the read half of the ops loop. Previously the tool returned raw `contentJson`, so an agent had to parse ProseMirror itself to discover what `2.1` addressed. `docBacked: false` means the draft holds raw HTML rather than an editable document (it was created with `contentHtml`/`contentSpec`, or imported): only a `compose` op can edit it, and `issue.apply_ops` says so in one clear error instead of returning one `unknown_path` skip per op.
+- **`issue.apply_ops` works on a post that is open in the editor, and the change appears there live.** Collaborative editing is on by default, so once a post has been opened in the Visual Email Designer its live document is a Yjs room and the issue's saved content is only a seed and a send-time snapshot. Ops for such a post are applied **on the collab server, against the live document, inside one transaction**, and the reduced result is baked back into the saved content afterwards — so an agent edit reaches every connected editor immediately instead of being reverted by the next sync. An operator with the post open sees the agent's blocks appear without reloading, and can keep typing. A draft nobody has opened has no room and is reduced in the API exactly as before. If the collab service is unreachable the call fails rather than falling back to the saved content, because that fallback is precisely the write the room would revert.
+- **`issue.apply_ops` and `issue.update_draft` take `baseUpdatedAt`** — the row version the write was composed against, enforced inside the UPDATE statement rather than by a read-then-compare, so it cannot race the writer it exists to catch. A mismatch is refused with the current version attached. `issue.apply_ops` also passes the version it read internally, closing its own read-apply-write window against a concurrent editor autosave. Omitting the field keeps the old last-write-wins behaviour.
+- **`email.lint`** — check email HTML against the Can I Email support matrix for the clients Mailtea refuses to regress (Apple Mail, Gmail, Outlook desktop). Returns `{findings, failCount, warnCount, strictClients, linted}`; severity `fail` means the layout **breaks** when unsupported (flex/grid collapse, absolute positioning, CSS variables, viewport units), `warn` means it degrades gracefully (a gradient or shadow simply does not paint). An agent cannot see a rendered preview, so this is the feedback loop that replaces looking at the thing — the same lint the studio runs over its built-in template library. Takes `issueId` (lint what is saved) or `html` (lint before posting it).
 - **Website Builder tools** — `site.get`, `site.pages_list`, `site.page_get`, `site.page_upsert`, `site.apply_ops`, `site.presets_list`, `site.design_brief_get`, `site.design_brief_set`, `site.publish`, `site.discard_draft`, `site.asset_list`. A publication's public website is now designable by an agent: read the site and the operator's design brief, compose pages from the curated Section Library, restyle the 12 theme tokens, preview the draft, and publish when asked. Auth and publication scoping ride the existing bearer token; the write tools additionally require the `site:write` scope and an editor-or-above publication role (see Changed, below).
 - **`site.apply_ops` is the one to reach for, and its schema says why.** It applies a batch of declarative ops (`set_theme`, `compose_page`, `insert_section`, `swap_section`, `edit_copy`, `edit_style`, `arrange`) to the site DRAFT and answers with `{applied, skipped:[{opIndex, op, reason, detail}]}` — a partially-applied batch comes back describable instead of as a 400 that discards the ops that did land. The alternative, `site.page_upsert`, writes a whole document through a **total parser that repairs silently**: unknown properties dropped, values clamped, overflow past the 40-section / 50-child / 200-node caps discarded, all behind a success response. Both facts are in the tool descriptions, because an agent only discovers what the schema advertises and a `200` from the second tool is not evidence the document was stored as sent. The 17 skip reasons (`unknown_preset`, `unknown_node`, `unknown_slot_key`, `value_too_long` — refused, never truncated — `page_full`, `bad_token_value`, `cycle`, …) are enumerated in the description so a model can self-correct on the next turn.
 - **The ops vocabulary is spelled out branch by branch** in `site.apply_ops`'s `inputSchema` — seven `anyOf` variants with their own required fields and per-property descriptions, and the 12 theme tokens enumerated with their meanings and ranges — rather than collapsed into a loose "array of objects". `baseVersion` carries the `draftVersion` a batch was composed against; a mismatch is refused with `site draft changed elsewhere` rather than overwriting another tab, device, or agent.

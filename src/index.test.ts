@@ -440,7 +440,154 @@ test("issue.get_editor calls query endpoint", async () => {
 
   const result = readJsonRpcResult(response);
   const content = result.content as Array<{ type: string; text: string }>;
-  assert.equal(content[0]?.text, "Loaded editor state for iss_123 (draft)");
+  // The summary carries what an agent needs before calling issue.apply_ops:
+  // how many blocks it can address, and the updatedAt to pass as baseUpdatedAt.
+  assert.match(content[0]?.text ?? "", /^Loaded editor state for iss_123 \(draft\)/);
+  assert.match(content[0]?.text ?? "", /addressable blocks/);
+});
+
+test("issue.apply_ops forwards the batch and echoes updatedAt for the next write", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return trpcOk({
+      report: { applied: 1, skipped: [] },
+      issueId: "iss_123",
+      title: "Weekly update",
+      updatedAt: "2026-02-20T03:20:00.000Z"
+    });
+  };
+
+  const response = await handleMcpRequest(
+    {
+      jsonrpc: "2.0",
+      id: 1.45,
+      method: "tools/call",
+      params: {
+        name: "issue.apply_ops",
+        arguments: {
+          issueId: "iss_123",
+          ops: [{ op: "edit_text", edits: [{ path: "0", text: "New copy" }] }],
+          baseUpdatedAt: "2026-02-20T03:10:00.000Z"
+        }
+      }
+    },
+    { apiBaseUrl: "http://localhost:8787", token: "pat_test_token", fetchImpl }
+  );
+
+  assert.equal(calls.length, 1);
+  const request = calls[0]!;
+  assert.equal(request.url, "http://localhost:8787/trpc/issue.applyOps");
+  assert.equal(request.init?.method, "POST");
+  assert.deepEqual(JSON.parse(request.init?.body as string), {
+    issueId: "iss_123",
+    ops: [{ op: "edit_text", edits: [{ path: "0", text: "New copy" }] }],
+    baseUpdatedAt: "2026-02-20T03:10:00.000Z"
+  });
+
+  const content = readJsonRpcResult(response).content as Array<{ text: string }>;
+  assert.match(content[0]?.text ?? "", /Applied 1\/1 ops/);
+  assert.match(content[0]?.text ?? "", /2026-02-20T03:20:00\.000Z/);
+});
+
+test("issue.apply_ops surfaces skipped ops instead of reporting a clean success", async () => {
+  const fetchImpl: typeof fetch = async () =>
+    trpcOk({
+      report: {
+        applied: 0,
+        skipped: [{ opIndex: 0, reason: "unknown_path", path: "9.9", detail: "no node at 9.9" }]
+      },
+      issueId: "iss_123",
+      title: "Weekly update",
+      updatedAt: "2026-02-20T03:10:00.000Z"
+    });
+
+  const response = await handleMcpRequest(
+    {
+      jsonrpc: "2.0",
+      id: 1.46,
+      method: "tools/call",
+      params: {
+        name: "issue.apply_ops",
+        arguments: {
+          issueId: "iss_123",
+          ops: [{ op: "edit_text", edits: [{ path: "9.9", text: "nowhere" }] }]
+        }
+      }
+    },
+    { apiBaseUrl: "http://localhost:8787", token: "pat_test_token", fetchImpl }
+  );
+
+  // A refused edit that reads as success is the failure mode the report exists
+  // to prevent — the summary must name it.
+  const content = readJsonRpcResult(response).content as Array<{ text: string }>;
+  assert.match(content[0]?.text ?? "", /1 SKIPPED/);
+  assert.match(content[0]?.text ?? "", /unknown_path/);
+  assert.match(content[0]?.text ?? "", /9\.9/);
+});
+
+test("email.lint reports failing findings with the clients that break", async () => {
+  const calls: FetchCall[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return trpcOk({
+      findings: [
+        {
+          slug: "css-display-flex",
+          severity: "fail",
+          feature: "display:flex",
+          clients: ["outlook"]
+        }
+      ],
+      failCount: 1,
+      warnCount: 0,
+      strictClients: ["apple-mail", "gmail", "outlook"],
+      linted: true
+    });
+  };
+
+  const response = await handleMcpRequest(
+    {
+      jsonrpc: "2.0",
+      id: 1.47,
+      method: "tools/call",
+      params: { name: "email.lint", arguments: { issueId: "iss_123" } }
+    },
+    { apiBaseUrl: "http://localhost:8787", token: "pat_test_token", fetchImpl }
+  );
+
+  const request = calls[0]!;
+  assert.equal(new URL(request.url).pathname, "/trpc/issue.lint");
+  assert.equal(request.init?.method, "GET");
+
+  const content = readJsonRpcResult(response).content as Array<{ text: string }>;
+  assert.match(content[0]?.text ?? "", /1 failing/);
+  assert.match(content[0]?.text ?? "", /display:flex/);
+  assert.match(content[0]?.text ?? "", /outlook/);
+});
+
+test("email.lint says so plainly when the email is clean", async () => {
+  const fetchImpl: typeof fetch = async () =>
+    trpcOk({
+      findings: [],
+      failCount: 0,
+      warnCount: 0,
+      strictClients: ["apple-mail", "gmail", "outlook"],
+      linted: true
+    });
+
+  const response = await handleMcpRequest(
+    {
+      jsonrpc: "2.0",
+      id: 1.48,
+      method: "tools/call",
+      params: { name: "email.lint", arguments: { html: "<p>Hello</p>" } }
+    },
+    { apiBaseUrl: "http://localhost:8787", token: "pat_test_token", fetchImpl }
+  );
+
+  const content = readJsonRpcResult(response).content as Array<{ text: string }>;
+  assert.match(content[0]?.text ?? "", /Clean/);
 });
 
 test("issue.update_draft sends mutation payload", async () => {
