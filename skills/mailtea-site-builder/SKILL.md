@@ -172,25 +172,103 @@ Skip reasons and what each is telling you:
 
 ## Craft rules
 
-- **One idea per section.** If a section needs two headlines, it is two sections.
-- **Typographic hierarchy is the design.** One `h1` per page, and a real size and
-  weight gap between levels — not 32px next to 28px.
-- **Whitespace carries rhythm.** Generous, *consistent* section padding
-  (64-96px vertical on desktop-width content) beats decorative dividers. Vary
-  spacing to group related things, not at random.
+Below is the rubric Mailtea's own website assistant is given and its eval harness
+scores against, so it is the bar your page is measured at too.
+
+<!-- BEGIN generated:design-rubric -->
+<!-- Generated from @mailtea/contracts by scripts/sync-rubric-docs.mjs.
+     Edit packages/contracts/src/design-rubric.ts, then run `pnpm rubric:sync`. -->
+
+Every page you produce is scored on six dimensions, 0-4 each, 24 total. Aim for 4s.
+
+### Hierarchy
+
+One dominant idea leads and everything else supports it. Composition carries the reading order before a word is read: with detail blurred, the primary element, the secondary element and the major groups should still be identifiable in that order. Rhythm comes from deliberate contrast between tight and generous intervals, not one spacing value repeated until every block weighs the same. Group by proximity before reaching for a box, and give a heading more room above it than below.
+
+4 — One unmistakable lead, groups that read in order, and an authored tight/generous rhythm.
+2 — A lead exists but competes with a second element, or spacing is uniform throughout.
+0 — No lead element — blocks of equal weight in an undifferentiated stack.
+
+### Typography
+
+Scale, weight and measure are chosen rather than inherited. Heading, body and fine print are distinguishable at a glance, and no two sizes sit close enough to be doing the same job. Body copy stays comfortable — 16px and up, with a line length in the 45-75 character range — and the family belongs to the product instead of being the closest available default.
+
+4 — A deliberate role scale with obvious steps; body copy comfortable at every width.
+2 — A workable scale with one collision, or a measure that runs long.
+0 — Arbitrary or colliding sizes; body copy too small or too wide to read comfortably.
+
+### Color
+
+A restrained palette with roles, not a bag of swatches: a background, a surface, text, and one accent that owns the one action. Where the publication's design brief is present it governs — follow it strictly, and fall back to Mailtea house style only when no brief exists. The strongest color earns a deliberate region or role; spending it on decoration leaves nothing to mark the thing that matters.
+
+4 — Every color has a role, the accent is rare and lands on the action, and the brief is honoured.
+2 — Mostly coherent, but a second accent or a decorative color dilutes the action.
+0 — Palette sprawl or an accent scattered everywhere; a brief, if present, is contradicted.
+
+### Accessibility
+
+WCAG AA, measured rather than claimed. Body text clears 4.5:1 against what sits behind it and large text 3:1. Every image carries alt text that reads on its own. Headings descend without skipping a level, links are told apart by more than color, and nothing that matters exists only inside a picture.
+
+4 — Every measured pair passes, alt text is meaningful, structure is semantic.
+2 — Mostly compliant with one measurable failure — a low-contrast secondary, a missing alt.
+0 — Contrast failures on body copy, images without alt text, meaning carried only by an image.
+
+### Clarity
+
+Copy is concrete, active-voice and sentence case, in the publication's own language. Controls name the action they perform — a label reading "Learn more" out of context names nothing. There is one obvious next action, reachable without hunting. No hype adjectives, no exclamation marks, no invented statistics or testimonials.
+
+4 — Every line concrete, one named primary action, nothing overstated.
+2 — Readable copy, but a vague control label or a second action competing with the first.
+0 — Hype copy, generic labels, and no discernible next action.
+
+### Responsive
+
+The page holds at 390px and at 1280px. Nothing overflows horizontally, no fixed width outruns a phone, and the structure adapts by reordering, collapsing or reflowing rather than shrinking. Touch targets stay comfortably tappable — around 44px — even when their visible mark is small.
+
+4 — Composed at both widths; the structure adapts rather than scaling down.
+2 — Works at both widths with rough edges — cramped targets or an awkward reflow.
+0 — Horizontal scroll, or fixed widths that break on a phone.
+
+### Named failure modes
+
+Each of these is a defect the score looks for by name. Do not produce one.
+
+- any.hierarchy.section-sprawl (P2) — Sections that do not earn their place — six things said vaguely instead of one thing said well.
+- any.hierarchy.weak-opening (P2) — No dominant opening: nothing establishes what this is before the reader has to work it out.
+- any.hierarchy.unauthored-rhythm (P2) — One spacing value repeated end to end — no tight/generous contrast, so every block weighs the same and nothing groups.
+- any.hierarchy.no-lead-among-peers (P2) — Several topics set at identical weight, leaving the reader to choose the lead the composition should have named.
+- any.typography.body-copy-too-small (P2) — Body copy set below 16px, which reads cramped on a phone.
+- any.typography.scale-collision (P2) — Heading and body sizes sit too close to carry different jobs — one size doing two jobs.
+- any.color.palette-sprawl (P2) — More colors than roles — beyond a background, a surface, text and one accent.
+- any.color.brief-violation (P1) — Contradicts the publication's design brief, which governs whenever one is present.
+- any.a11y.low-contrast (P1) — A text/background pair below WCAG AA — 4.5:1 for body copy, 3:1 for large text.
+- any.a11y.missing-alt (P1) — An image with no alt text, or alt text that does not read on its own.
+- any.a11y.meaning-in-image (P1) — Copy that exists only inside a picture — it disappears when images are blocked or unreadable.
+- any.clarity.hype-copy (P2) — Hype adjectives, exclamation marks, or invented statistics and testimonials.
+- any.clarity.generic-cta (P2) — A control labelled "Click here" or "Learn more" — a label that names nothing out of context.
+- any.clarity.no-primary-action (P1) — No obvious next action, or several competing for the same attention.
+- site.responsive.fixed-width-overflow (P1) — A fixed width wider than a 390px phone viewport, forcing horizontal scroll.
+- site.responsive.tiny-touch-target (P2) — An interactive target smaller than roughly 44px in either direction.
+- site.a11y.heading-order (P2) — A heading level skipped on the way down the page, breaking the outline.
+
+<!-- END generated:design-rubric -->
+
+### Builder specifics
+
 - **Token refs over literals** — always, unless the design genuinely needs a
   one-off. Literal colors are how a site stops being re-themeable.
-- **Restrained palette.** One accent. Status and emphasis come from weight and
-  spacing before color.
-- **Concrete, active copy.** "Weekly field notes on shipping infrastructure" beats
-  "Welcome to my newsletter". No hype words, no exclamation marks, no
-  "revolutionary". Say what the reader gets and how often.
+- **Section padding is the rhythm.** 64-96px vertical on desktop-width content,
+  consistent, beats decorative dividers. Vary it to group related things, not at
+  random.
+- **One `h1` per page**, with a real size and weight gap between levels — not
+  32px next to 28px.
 - **Fewer, better sections.** A home page that lands is usually hero → posts →
   subscribe, maybe with about or a quote. Five strong sections beat eleven filler
   ones; length is not effort.
 - **Every image needs real `alt`.** Use `site.asset_list` for URLs that exist —
   never invent an image URL, it will render broken.
-- **One clear primary action per screenful**, and it is almost always "subscribe".
+- **The primary action is almost always "subscribe"**, and it belongs on every
+  screenful.
 - **Check the small viewport.** `columns` stack on mobile; a four-column row of
   long headings is unreadable there.
 
