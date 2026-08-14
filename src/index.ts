@@ -1468,7 +1468,7 @@ const SITE_OP_SCHEMA = {
         style: {
           type: "object",
           description:
-            "Text/surface properties: textColor, textOpacityPct, fontFamily, fontSizePx, fontWeight, lineHeightPct, letterSpacingPx, textAlign, textTransform, highlightColor, background.",
+            "Text/surface properties: textColor, textOpacityPct, fontFamily, fontSizePx, fontWeight, lineHeightPct, letterSpacingPx, textAlign, textTransform, background.",
           additionalProperties: {
             anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }]
           }

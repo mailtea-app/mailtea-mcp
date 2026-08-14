@@ -2,6 +2,16 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
+## Unreleased
+
+- Removed: `highlightColor` from the `site.edit_style` property list. It was
+  declared in the site document schema and advertised in the tool description
+  from the first Website Builder V3 commit, but the renderer never emitted it —
+  an agent that set it got a silent no-op and no `unknown_path` skip to learn
+  from, because the reducer recognised the key. Nothing in the shipped
+  templates or any stored document used it. Removing it means an agent setting
+  `highlightColor` now gets a proper skip report instead of silence.
+
 ## 0.8.0 (2026-08-06)
 
 - Added: `set_styles` reaches the typography an agent could not state before —

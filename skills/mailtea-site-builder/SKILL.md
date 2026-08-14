@@ -56,7 +56,7 @@ A page document:
   literals is a pile of hardcoded colors that drift the moment the palette changes.
 - `style` holds text/surface properties (textColor, fontFamily, fontSizePx,
   fontWeight, lineHeightPct, letterSpacingPx, textAlign, textTransform,
-  highlightColor, background). `layout` holds the box (paddingTop/Right/Bottom/LeftPx,
+  background). `layout` holds the box (paddingTop/Right/Bottom/LeftPx,
   align, widthMode, widthPx, maxWidthPx, gapPx, borderColor, borderWidthPx, radiusPx).
 - **Limits**: 40 sections per page, 50 children per container, 200 nodes per page.
   Exceeding them is refused, not silently trimmed.
