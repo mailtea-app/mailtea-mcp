@@ -1464,7 +1464,17 @@ const SITE_OP_SCHEMA = {
         "edit_style — restyle one node. A property value naming a theme token (e.g. \"palette.accent\") LINKS the property to the theme; anything else becomes a literal override.",
       properties: {
         op: { type: "string", enum: ["edit_style"] },
-        nodeId: { type: "string", description: "Id of an existing node in the page document." },
+        nodeId: {
+          type: "string",
+          description:
+            "Id of an existing node — from the page document, or the shared navbar/footer chrome."
+        },
+        part: {
+          type: "string",
+          enum: ["band", "inner"],
+          description:
+            "Restyle a sub-element instead of the node itself. \"band\" is the full-bleed strip, \"inner\" the centred content column. On the navbar or footer this is the difference between a full-width bar and a floating pill: set the band to background \"transparent\", then give the node itself a background, radiusPx and maxWidthPx. Omit to style the node."
+        },
         style: {
           type: "object",
           description:

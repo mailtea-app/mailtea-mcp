@@ -4,6 +4,18 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
 
+- Added: `part` on `site.edit_style`, taking `"band"` (the full-bleed strip) or
+  `"inner"` (the centred content column). Without it a node could only be
+  styled as a single box, so chrome that does not span the full width — a
+  floating pill navbar — was inexpressible: set the band to `transparent`, then
+  give the node itself a background, `radiusPx` and `maxWidthPx`.
+- Changed: `site.edit_style` and `site.edit_copy` now accept the shared
+  navbar/footer node ids, which `site.read_page` reports alongside the page
+  sections. Previously the reducer indexed the page only and rejected them as
+  `unknown_node`, so every generated design inherited the previous site's
+  chrome. Both trees are site-wide — a change shows on every page — and
+  `site.arrange` still refuses them, since neither root sits in the page's
+  section list.
 - Removed: `highlightColor` from the `site.edit_style` property list. It was
   declared in the site document schema and advertised in the tool description
   from the first Website Builder V3 commit, but the renderer never emitted it —
