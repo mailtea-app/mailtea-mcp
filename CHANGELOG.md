@@ -4,6 +4,129 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
 
+- Added: `image/svg+xml` is an accepted asset type for `assets.upload` — SVG
+  logos and marks upload like any raster. The public asset route serves every
+  asset with `Content-Security-Policy: sandbox`, which is what makes hosting
+  SVGs safe: scripts inside one never execute, in an `<img>` or navigated to
+  directly.
+
+- Added: the `logo` site block is documented in the site-document help text.
+  An empty `src` inherits the publication's own logo at render; `heightPx`
+  sizes it and `href` (default `/`) links it. Agents discover blocks from that
+  help, so without this entry the block existed and no agent could know.
+
+- Added: `rename_nodes` op on `site.apply_ops` — labels nodes in the builder's
+  layer tree (`renames: [{ nodeId, layerName }]`). Editor metadata only: the
+  rendered page is byte-identical, so this changes nothing a visitor sees. It
+  earns its place after `compose_page`, where a generated navbar is several
+  nested groups and the operator otherwise opens the builder to a column of
+  identical "Group" rows.
+
+  The field is `layerName`, not `name`, because `icon` blocks already have a
+  `name` that says WHICH glyph to draw. Sharing the key would have let renaming
+  an icon's layer silently change the icon on the live site.
+
+- Fixed: `set_navbar_template` is now advertised in the `site.apply_ops`
+  schema. The op shipped in the reducer and `site.navbar_templates_list`
+  described it ("apply one with the `set_navbar_template` op") while no tool
+  schema ever declared it — so the tool recommending it pointed at something no
+  agent could discover. The op-kind guard now derives from contracts instead of
+  a hand-written list, which is what let it drift.
+
+- **BREAKING — renamed: `preset` is now `template` across every site tool.**
+  `site.presets_list` → `site.section_templates_list`, `site.navbar_presets_list` →
+  `site.navbar_templates_list`, and the `presetId` / `fromPresetId` arguments on
+  `site.apply_ops` (`insert_section`, `swap_section`, `compose_page`,
+  `set_navbar_preset` → `set_navbar_template`) are now `templateId` /
+  `fromTemplateId`. The `unknown_preset` skip reason is now `unknown_template`.
+  There is no alias: calls using the old names fail validation.
+
+  Why: operators read "template" everywhere in Mailtea — it names the `/templates`
+  route and the site-setup gallery — while agents wrote `presetId`. One concept
+  with a different word per persona is a tax the docs cannot pay off, so the
+  agent surface moves to the word the product already uses.
+
+  Migrating: rename the argument keys and tool names. Nothing else changes —
+  the ids themselves (`hero-split`, `posts-grid`, …) are untouched, and no
+  stored document carried a preset id, so existing sites are unaffected.
+
+- Changed: `site.get` now states that the navbar and footer node ids it returns
+  are addressable by `edit_copy` and `edit_style`. The capability shipped and
+  the ids were already in the response, but nothing connected the two — an
+  agent had to infer from the `nodeId` description that the chrome it had just
+  read was editable.
+
+- Changed: the `arrange` op's `parentId` description now says plainly that a
+  SECTION move must omit it. In a design-eval run 17 of 19 skipped ops were
+  section moves carrying a parent — 5 passing the literal string `"page"`,
+  which is not a node, and 12 naming a real block id. Both were correctly
+  refused; the schema simply never said which shape was expected.
+
+- Added: `navStyle` on a `postHeader` — `"links" | "breadcrumb"`. A breadcrumb
+  is a claim about STRUCTURE rather than a back button: it says where the post
+  sits, so a reader can leave sideways instead of only retracing. Adjacent-issue
+  links and the keyboard hint that promises them are dropped when it is on,
+  because a path is not a pager. `eyebrow` also takes `"none"`, since a crumb
+  already says where the reader is.
+
+- Added: `align` and `eyebrow` on a `postHeader` block — `"left" | "center"` and
+  `"text" | "chip"`. Together they are the article treatment: a label, a large
+  title and its date on the page's axis, rather than a heading stacked at the
+  left of a column. Both default to what every existing post page already
+  renders, so turning it on is a choice rather than a migration.
+
+- Added: `shadow` on the layout bag — `"none" | "sm" | "md" | "lg"`. A named
+  elevation step rather than a raw shadow string, because an arbitrary offset
+  and blur reads as a bug and there is no useful way to reason about
+  `0 22px 50px -42px`. It also makes `"none"` mean something: base chrome puts a
+  shadow on a post card, and until now no operator or agent could take it off,
+  because the vocabulary had no property for it.
+
+- Added: `tagFilter` on a `postCollection` — `{ mode: "none" | "chips",
+  allLabel }`, reader-facing chips that narrow what is already on the page.
+  Distinct from `categoryIds`, which is an AUTHORING filter deciding which posts
+  are fetched: the author picks the pool, the reader picks within it. Offered
+  only when the rendered posts carry more than one tag, so the chips can never
+  be a control that changes nothing.
+
+- Added: `pagination` on a `postCollection` — `{ mode: "none" | "loadMore",
+  pageSize, buttonText }`. Reveal-style: the server renders every post the block
+  asks for and the client collapses the list, so a reader without JavaScript
+  sees them all rather than a truncated list behind a button that cannot work,
+  and a crawler indexes them. It pages what is already on the page, so the
+  ceiling is the block's `limit`; fetching past that needs a route and is a
+  different feature.
+
+- Added: `emptyState` on a `postCollection` — `{ headline, body, hidden }`.
+  With no posts the block rendered its heading over an empty grid, which reads
+  as broken rather than as waiting, and every brand-new publication starts
+  there. Absent, a sensible default is rendered rather than nothing; `hidden`
+  is the opt-out for a collection whose absence should be silent.
+
+- Added: gradients. A `background` value may now be a `linear-gradient(...)` or
+  `radial-gradient(...)` as well as a hex colour or `transparent`. Matched by an
+  allowlist grammar — hex colours, percentage stops, angles and side keywords,
+  and no parenthesis may appear inside, which rules out `url()`, `var()` and
+  `expression()` without enumerating them. Previously a fill was one flat
+  colour, so any brief asking for a wash or a fade was silently flattened.
+
+- Added: `level` on `site.apply_ops` `edit_copy` edits. A heading's level was
+  reachable by no op at all, so an agent handed a page whose h2 section holds h4
+  items — which a screen reader reads as a missing section — could see the
+  defect and had no way to repair it.
+
+- Added: `site.footer_templates_list` and the `set_footer_template` op — a
+  curated footer library, the counterpart to the navbar one. The shipped
+  default footer is a single empty text node, and because structural ops do not
+  address the chrome, an agent asked for a real footer had to hand-assemble
+  every node, including the unsubscribe link a footer is obliged to carry.
+  Every template but `footer-simple` ships that link.
+
+- Added: eight more navbar templates (12 total), covering the trailing group
+  (`navbar-split`, `navbar-links-right`, `navbar-center-links`), the bar
+  treatment (`navbar-pill`, `navbar-inverted`) and wordmark position and row
+  count (`navbar-brand-only`, `navbar-utility-bar`, `navbar-centered-cta`).
+
 - Added: `part` on `site.edit_style`, taking `"band"` (the full-bleed strip) or
   `"inner"` (the centred content column). Without it a node could only be
   styled as a single box, so chrome that does not span the full width — a

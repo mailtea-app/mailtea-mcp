@@ -450,7 +450,7 @@ type SectionPackRestoreRevisionResult = {
 };
 
 type SectionImportResult = {
-  presetId: string;
+  templateId: string;
   createdCount: number;
   updatedCount: number;
   imported: ReusableSectionRecord[];
@@ -512,7 +512,7 @@ type SiteOpsReportRecord = {
   }>;
 };
 
-type SitePresetRecord = {
+type SiteTemplateRecord = {
   id: string;
   category: string;
   name: string;
@@ -1025,7 +1025,7 @@ const AUTOMATION_STEP_TYPE_CATALOG = {
  * it writes anything. Kept in one string so every site tool description can
  * point at the same vocabulary.
  */
-const SITE_DOC_HELP = `A publication has exactly ONE site, made of pages. A page document is {"version":3,"sections":[...]}; a section is {"id","type":"section","blocks":[...]}. Blocks are discriminated on "type": heading, text, richText, button, link, image, embed, icon, divider, spacer, subscribeForm, contactForm, unsubscribeForm, postHeader, postBody, postCollection, group (children[]), columns (columns[i].blocks[]). Every style/layout property is {"ref":"palette.accent"} (linked to the theme) or {"value":24} (a literal override) — PREFER refs so the site re-themes coherently. Limits: 40 sections/page, 50 children per container, 200 nodes/page. Writes land on the DRAFT; the public site keeps serving the live version until site.publish.`;
+const SITE_DOC_HELP = `A publication has exactly ONE site, made of pages. A page document is {"version":3,"sections":[...]}; a section is {"id","type":"section","blocks":[...]}. Blocks are discriminated on "type": heading, text, richText, button, link, image, embed, logo (src ""=publication logo, heightPx, href), icon, divider, spacer, subscribeForm, contactForm, unsubscribeForm, postHeader, postBody, postCollection, group (children[]), columns (columns[i].blocks[]). Every style/layout property is {"ref":"palette.accent"} (linked to the theme) or {"value":24} (a literal override) — PREFER refs so the site re-themes coherently. Limits: 40 sections/page, 50 children per container, 200 nodes/page. Writes land on the DRAFT; the public site keeps serving the live version until site.publish.`;
 
 /** The 12 theme tokens, mirrored from SITE_THEME_TOKEN_SPECS in @mailtea/contracts. */
 const SITE_THEME_TOKEN_PROPERTIES = {
@@ -1050,14 +1050,14 @@ const SITE_THEME_TOKEN_PROPERTIES = {
 } as const;
 
 /**
- * Copy for a preset's slots, keyed by slot key. A value slot takes a string; a
- * repeat slot takes a list of item maps. site.presets_list is the authority on
- * which keys a given preset declares.
+ * Copy for a template's slots, keyed by slot key. A value slot takes a string; a
+ * repeat slot takes a list of item maps. site.section_templates_list is the authority on
+ * which keys a given template declares.
  */
 const SITE_COPY_MAP_SCHEMA = {
   type: "object",
   description:
-    "Copy for the preset's slots, keyed by slot key (headline, body, ctaLabel, ctaHref, imageSrc, items, …). A value slot takes text; a repeat slot takes a list of item maps. Keys the preset does not declare come back as unknown_slot_key; omitted slots keep the preset's authored placeholder copy.",
+    "Copy for the template's slots, keyed by slot key (headline, body, ctaLabel, ctaHref, imageSrc, items, …). A value slot takes text; a repeat slot takes a list of item maps. Keys the template does not declare come back as unknown_slot_key; omitted slots keep the template's authored placeholder copy.",
   additionalProperties: {
     anyOf: [
       { type: "string" },
@@ -1375,7 +1375,7 @@ const SITE_OP_SCHEMA = {
     {
       type: "object",
       description:
-        "compose_page — replace the page's sections wholesale. The 'design me a page' op; the page is left untouched if none of the presets resolve.",
+        "compose_page — replace the page's sections wholesale. The 'design me a page' op; the page is left untouched if none of the templates resolve.",
       properties: {
         op: { type: "string", enum: ["compose_page"] },
         sections: {
@@ -1384,13 +1384,13 @@ const SITE_OP_SCHEMA = {
           items: {
             type: "object",
             properties: {
-              presetId: {
+              templateId: {
                 type: "string",
-                description: "Id of a section preset from the curated Section Library (site.presets_list)."
+                description: "Id of a section template from the curated Section Library (site.section_templates_list)."
               },
               copy: SITE_COPY_MAP_SCHEMA
             },
-            required: ["presetId"]
+            required: ["templateId"]
           }
         }
       },
@@ -1398,12 +1398,12 @@ const SITE_OP_SCHEMA = {
     },
     {
       type: "object",
-      description: "insert_section — insert one preset section at a position in the page.",
+      description: "insert_section — insert one template section at a position in the page.",
       properties: {
         op: { type: "string", enum: ["insert_section"] },
-        presetId: {
+        templateId: {
           type: "string",
-          description: "Id of a section preset from the curated Section Library (site.presets_list)."
+          description: "Id of a section template from the curated Section Library (site.section_templates_list)."
         },
         index: {
           type: "number",
@@ -1412,23 +1412,23 @@ const SITE_OP_SCHEMA = {
         },
         copy: SITE_COPY_MAP_SCHEMA
       },
-      required: ["op", "presetId", "index"]
+      required: ["op", "templateId", "index"]
     },
     {
       type: "object",
       description:
-        "swap_section — replace an existing section with a different preset, carrying its copy across.",
+        "swap_section — replace an existing section with a different template, carrying its copy across.",
       properties: {
         op: { type: "string", enum: ["swap_section"] },
         sectionId: { type: "string", description: "Id of the section being replaced." },
-        presetId: { type: "string", description: "Preset to swap in." },
-        fromPresetId: {
+        templateId: { type: "string", description: "Template to swap in." },
+        fromTemplateId: {
           type: "string",
           description:
-            "Preset the section was originally built from. Pass it when known — copy then transfers exactly, by slot key."
+            "Template the section was originally built from. Pass it when known — copy then transfers exactly, by slot key."
         }
       },
-      required: ["op", "sectionId", "presetId"]
+      required: ["op", "sectionId", "templateId"]
     },
     {
       type: "object",
@@ -1437,7 +1437,7 @@ const SITE_OP_SCHEMA = {
         op: { type: "string", enum: ["edit_copy"] },
         edits: {
           type: "array",
-          description: "1-100 edits. Each must set text, href, or both.",
+          description: "1-100 edits. Each must set at least one of text, href or level.",
           items: {
             type: "object",
             properties: {
@@ -1450,7 +1450,14 @@ const SITE_OP_SCHEMA = {
                 description:
                   "New text for the node's primary text field (heading/text → text, button/link → label, image → alt, subscribeForm → headline)."
               },
-              href: { type: "string", description: "New link target (button, link, image)." }
+              href: { type: "string", description: "New link target (button, link, image)." },
+              level: {
+                type: "integer",
+                minimum: 1,
+                maximum: 6,
+                description:
+                  "Heading level, 1-6. Heading nodes only. Use it to repair an outline that skips a level — a section headed h2 whose items are h4 reads to a screen reader as a missing section. Level is structure, not size: restyle with fontSizePx if you only want it bigger."
+              }
             },
             required: ["nodeId"]
           }
@@ -1478,7 +1485,7 @@ const SITE_OP_SCHEMA = {
         style: {
           type: "object",
           description:
-            "Text/surface properties: textColor, textOpacityPct, fontFamily, fontSizePx, fontWeight, lineHeightPct, letterSpacingPx, textAlign, textTransform, background.",
+            "Text/surface properties: textColor, textOpacityPct, fontFamily, fontSizePx, fontWeight, lineHeightPct, letterSpacingPx, textAlign, textTransform, background. `background` takes a #rrggbb hex, \"transparent\", or a gradient — linear-gradient(...) / radial-gradient(...) built from hex colours, percentage stops, angles and side keywords.",
           additionalProperties: {
             anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }]
           }
@@ -1486,7 +1493,7 @@ const SITE_OP_SCHEMA = {
         layout: {
           type: "object",
           description:
-            "Box properties: paddingTopPx, paddingRightPx, paddingBottomPx, paddingLeftPx, align, widthMode, widthPx, maxWidthPx, gapPx, borderColor, borderWidthPx, radiusPx.",
+            "Box properties: paddingTopPx, paddingRightPx, paddingBottomPx, paddingLeftPx, align, widthMode, widthPx, maxWidthPx, gapPx, borderColor, borderWidthPx, radiusPx, shadow (a named elevation step: none, sm, md or lg — not a raw shadow string; none is how you remove one that base chrome applied).",
           additionalProperties: {
             anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }]
           }
@@ -1512,7 +1519,7 @@ const SITE_OP_SCHEMA = {
               parentId: {
                 type: "string",
                 description:
-                  "New parent (section, group, or column id). Omit to reorder within the node's current parent; sections always reorder at page level."
+                  "New parent (section, group, or column id). Omit to reorder within the node's current parent. A SECTION always lives at page level: omit parentId entirely to move one, and pass an index alone. Any parentId on a section move is refused — including the literal string \"page\", which is not a node — because a section cannot be nested inside a block."
               },
               index: {
                 type: "number",
@@ -1530,6 +1537,73 @@ const SITE_OP_SCHEMA = {
         }
       },
       required: ["op"]
+    },
+    {
+      type: "object",
+      description:
+        "set_footer_template — replace the whole footer with one from the curated library (see site.footer_templates_list). The shipped default footer is a single empty text node, so this is usually the first thing a new site needs. Every template except \"footer-simple\" carries an unsubscribe link, which a footer is obliged to have. It REPLACES the existing footer.",
+      properties: {
+        op: { type: "string", enum: ["set_footer_template"] },
+        templateId: {
+          type: "string",
+          description:
+            "Id of a footer template from site.footer_templates_list, e.g. \"footer-split\"."
+        },
+        brand: {
+          type: "string",
+          description:
+            "Wordmark text, for the templates that carry one. Omitted, the template's placeholder is kept."
+        }
+      },
+      required: ["op", "templateId"]
+    },
+    {
+      type: "object",
+      description:
+        "set_navbar_template — replace the whole navbar with one from the curated library (see site.navbar_templates_list). Prefer this over hand-assembling a navbar node by node: a template is theme-linked, responsive, and carries its own mobile menu. It REPLACES the existing navbar.",
+      properties: {
+        op: { type: "string", enum: ["set_navbar_template"] },
+        templateId: {
+          type: "string",
+          description:
+            "Id of a navbar template from site.navbar_templates_list, e.g. \"navbar-classic\"."
+        },
+        brand: {
+          type: "string",
+          description:
+            "Wordmark text. Omitted, the template's placeholder is kept and the operator renames it in the builder."
+        }
+      },
+      required: ["op", "templateId"]
+    },
+    {
+      type: "object",
+      description:
+        "rename_nodes — label nodes in the builder's layer tree. Editor metadata only: visitors never see these names and the rendered page is unchanged. Worth doing after compose_page — a generated navbar is several nested groups, and an operator opening the builder otherwise sees \"Group, Group, Group\" with no way to tell which holds what.",
+      properties: {
+        op: { type: "string", enum: ["rename_nodes"] },
+        renames: {
+          type: "array",
+          description: "Up to 100 renames.",
+          items: {
+            type: "object",
+            properties: {
+              nodeId: {
+                type: "string",
+                description:
+                  "Node to label — a section, or a block anywhere in the page, navbar or footer. Column slots have no layer row and come back skipped."
+              },
+              layerName: {
+                type: "string",
+                description:
+                  "Label shown in the layer tree, e.g. \"Left group\" (max 80 chars). Empty string clears it and the tree falls back to the node's type."
+              }
+            },
+            required: ["nodeId", "layerName"]
+          }
+        }
+      },
+      required: ["op", "renames"]
     }
   ]
 } as const;
@@ -1543,7 +1617,7 @@ const SITE_OP_SCHEMA = {
  * client that asked was told the wrong number; `version.test.ts` now ties the
  * two together.
  */
-export const SERVER_VERSION = "0.8.0";
+export const SERVER_VERSION = "0.9.0";
 
 export const MCP_TOOLS = [
   {
@@ -2223,9 +2297,9 @@ export const MCP_TOOLS = [
       type: "object",
       properties: {
         publicationId: { type: "string" },
-        presetId: { type: "string" }
+        templateId: { type: "string" }
       },
-      required: ["publicationId", "presetId"]
+      required: ["publicationId", "templateId"]
     }
   },
   {
@@ -3919,7 +3993,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
   },
   {
     name: "site.get",
-    description: `Load the publication's website: settings, the v3 design (theme tokens, navbar, footer), the operator's design brief, and draftVersion. START HERE — the design brief is the operator's standing instruction for how the site should look and MUST be followed, and draftVersion is the token every write passes back as baseVersion. ${SITE_DOC_HELP}`,
+    description: `Load the publication's website: settings, the v3 design (theme tokens, navbar, footer), the operator's design brief, and draftVersion. The navbar and footer node ids it returns are addressable by edit_copy and edit_style, so this is where you find them — but both trees are shared by EVERY page, so never put page-specific copy in them, and arrange refuses them. START HERE — the design brief is the operator's standing instruction for how the site should look and MUST be followed, and draftVersion is the token every write passes back as baseVersion. ${SITE_DOC_HELP}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -3951,7 +4025,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
         slug: { type: "string", description: "Page slug, e.g. \"home\"." },
         kind: {
           type: "string",
-          enum: ["home", "archive", "post", "custom", "unsubscribe", "unsubscribe_success"],
+          enum: ["home", "archive", "post", "subscribe", "unsubscribe", "unsubscribe_success"],
           description: "Page kind. Defaults to \"home\" when no pageId or slug is given."
         }
       },
@@ -3960,7 +4034,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
   },
   {
     name: "site.page_upsert",
-    description: `Create or replace a WHOLE page document. Prefer site.apply_ops for edits — this write goes through a total parser that silently REPAIRS what it cannot accept (clamping values, dropping unknown properties and overflow past the 40-section / 50-child / 200-node caps), so a success response does NOT mean the document was stored as sent. Read the page back with site.page_get and diff it. Note this writes the LIVE row for content ('draft' status keeps a page off the public site), not the draft column. ${SITE_DOC_HELP}`,
+    description: `Create or replace a WHOLE page document. A site's pages are a FIXED SET — home, archive, post, and the unsubscribe pair; free landing pages are not available yet, so there is no "custom" kind to create one with. (/subscribe is served from a built-in document and needs no page.) Prefer site.apply_ops for edits — this write goes through a total parser that silently REPAIRS what it cannot accept (clamping values, dropping unknown properties and overflow past the 40-section / 50-child / 200-node caps), so a success response does NOT mean the document was stored as sent. Read the page back with site.page_get and diff it. Note this writes the LIVE row for content ('draft' status keeps a page off the public site), not the draft column. ${SITE_DOC_HELP}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -3968,7 +4042,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
         id: { type: "string", description: "Existing page id. Omit to create a new page." },
         kind: {
           type: "string",
-          enum: ["home", "archive", "post", "custom", "unsubscribe", "unsubscribe_success"]
+          enum: ["home", "archive", "post", "subscribe", "unsubscribe", "unsubscribe_success"]
         },
         slug: { type: "string" },
         title: { type: "string" },
@@ -3977,6 +4051,14 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
           type: "object",
           description:
             "The page document: {\"version\":3,\"sections\":[...]}. Omit to leave the stored document untouched."
+        },
+        hideNavbar: {
+          type: "boolean",
+          description: "Omit the site navbar on this page."
+        },
+        hideFooter: {
+          type: "boolean",
+          description: "Omit the site footer on this page."
         },
         seoTitle: { type: ["string", "null"] },
         seoDescription: { type: ["string", "null"] },
@@ -3987,7 +4069,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
   },
   {
     name: "site.apply_ops",
-    description: `Apply a batch of declarative edits to the site DRAFT — the safe way to design a site. Every op is applied in order and answered with a report: {applied, skipped:[{opIndex, op, reason, detail}]}. A 200 with skips is the normal, honest outcome — READ THE REPORT, it is the only place a refused edit is named. Reasons: unknown_preset, unknown_node, unknown_slot_key, unknown_slot_field, copy_shape_mismatch, repeat_out_of_bounds, value_too_long (refused, never truncated), bad_index, page_full, no_design, unknown_token, bad_token_value, unknown_style_prop, empty_edit, not_a_container, cycle, extract_failed, invalid_op. Compose from presets (site.presets_list) rather than hand-authoring blocks. ${SITE_DOC_HELP}`,
+    description: `Apply a batch of declarative edits to the site DRAFT — the safe way to design a site. Every op is applied in order and answered with a report: {applied, skipped:[{opIndex, op, reason, detail}]}. A 200 with skips is the normal, honest outcome — READ THE REPORT, it is the only place a refused edit is named. Reasons: unknown_template, unknown_node, unknown_slot_key, unknown_slot_field, copy_shape_mismatch, repeat_out_of_bounds, value_too_long (refused, never truncated), bad_index, page_full, no_design, unknown_token, bad_token_value, unknown_style_prop, empty_edit, not_a_container, cycle, extract_failed, invalid_op. Compose from templates (site.section_templates_list) rather than hand-authoring blocks. ${SITE_DOC_HELP}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -3996,6 +4078,11 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
           type: "string",
           description:
             "Page the ops edit. Defaults to the home page; the response echoes back which page was written. Ops that need a page when the site has none come back skipped, not as an error."
+        },
+        slug: {
+          type: "string",
+          description:
+            "Page slug, e.g. \"changelog\" — the same addressing site.page_get and site.page_upsert accept. Use this OR pageId; omit both to edit the home page."
         },
         ops: {
           type: "array",
@@ -4011,10 +4098,34 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
       required: ["publicationId", "ops"]
     }
   },
-  {
-    name: "site.presets_list",
+    {
+    name: "site.footer_templates_list",
     description:
-      "The curated Section Library: every insertable section preset with its id, category, name, description, and slots. Slots are the contract for copy — a value slot takes a string under its key, a repeat slot takes a list of item maps (its itemSlots name the per-item keys, min/max bound the count). A preset with no slots is a structural scaffold, inserted as authored. Read this before composing with site.apply_ops; a presetId not in this list is skipped as unknown_preset.",
+      "The curated footer library: every footer template with its id, name and description. Apply one with the `set_footer_template` op in site.apply_ops. The shipped default footer is a single empty text node and structural ops do not address the chrome, so hand-assembling a footer means building every node — including the unsubscribe link. Templates are theme-linked and stack on a phone without per-template configuration.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" }
+      },
+      required: ["publicationId"]
+    }
+  },
+{
+    name: "site.navbar_templates_list",
+    description:
+      "The curated navbar library: every navbar template with its id, name, description, and mobile behaviour. Apply one with the `set_navbar_template` op in site.apply_ops. Prefer this over hand-assembling a navbar node by node — structural ops do not address the site chrome, and a hand-built navbar has no distribution control, so it tends to rely on fixed-width spacers that break on a phone. A template is theme-linked and carries its own mobile menu.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" }
+      },
+      required: ["publicationId"]
+    }
+  },
+{
+    name: "site.section_templates_list",
+    description:
+      "The curated Section Library: every insertable section template with its id, category, name, description, and slots. Slots are the contract for copy — a value slot takes a string under its key, a repeat slot takes a list of item maps (its itemSlots name the per-item keys, min/max bound the count). A template with no slots is a structural scaffold, inserted as authored. Read this before composing with site.apply_ops; a templateId not in this list is skipped as unknown_template.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4078,7 +4189,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
   {
     name: "site.asset_list",
     description:
-      "List images in the publication's asset library, newest first, with the absolute URLs to use as an image block's src or a preset's imageSrc slot. Each entry carries fileName, contentType, byteSize and width/height, so pick by what the image IS rather than by position. Use a real asset instead of inventing an image URL.",
+      "List images in the publication's asset library, newest first, with the absolute URLs to use as an image block's src or a template's imageSrc slot. Each entry carries fileName, contentType, byteSize and width/height, so pick by what the image IS rather than by position. Use a real asset instead of inventing an image URL.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4099,7 +4210,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
         publicationId: { type: "string" },
         contentType: {
           type: "string",
-          enum: ["image/png", "image/jpeg", "image/gif", "image/webp"],
+          enum: ["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"],
           description: "The image's real MIME type. Checked against the file's magic bytes."
         },
         dataBase64: {
@@ -5851,19 +5962,19 @@ async function runTool(
 
   if (toolName === "section.import_pack") {
     const publicationId = readRequiredString(args, "publicationId");
-    const presetId = readRequiredString(args, "presetId");
+    const templateId = readRequiredString(args, "templateId");
 
     const result = await callTrpc<SectionImportResult>(
       "section.importPack",
       {
         publicationId,
-        presetId
+        templateId
       },
       options
     );
 
     return makeToolResult(
-      `Imported pack ${result.presetId}: ${result.createdCount} created, ${result.updatedCount} updated`,
+      `Imported pack ${result.templateId}: ${result.createdCount} created, ${result.updatedCount} updated`,
       result
     );
   }
@@ -8169,6 +8280,8 @@ async function runTool(
     const seoTitle = readNullableString(args, "seoTitle");
     const seoDescription = readNullableString(args, "seoDescription");
     const seoOgImageUrl = readNullableString(args, "seoOgImageUrl");
+    const hideNavbar = typeof args.hideNavbar === "boolean" ? args.hideNavbar : undefined;
+    const hideFooter = typeof args.hideFooter === "boolean" ? args.hideFooter : undefined;
 
     const result = await callTrpc<{ page: SitePageRecord }>(
       "publication.sitePageUpsert",
@@ -8182,7 +8295,9 @@ async function runTool(
         ...(contentJson !== undefined ? { contentJson } : {}),
         ...(seoTitle !== undefined ? { seoTitle } : {}),
         ...(seoDescription !== undefined ? { seoDescription } : {}),
-        ...(seoOgImageUrl !== undefined ? { seoOgImageUrl } : {})
+        ...(seoOgImageUrl !== undefined ? { seoOgImageUrl } : {}),
+        ...(hideNavbar !== undefined ? { hideNavbar } : {}),
+        ...(hideFooter !== undefined ? { hideFooter } : {})
       },
       options
     );
@@ -8200,6 +8315,7 @@ async function runTool(
   if (toolName === "site.apply_ops") {
     const publicationId = readRequiredString(args, "publicationId");
     const pageId = asOptionalString(args.pageId);
+    const slug = asOptionalString(args.slug);
     const ops = readRequiredJsonObjectArray(args, "ops");
     const baseVersion = readOptionalNumber(args, "baseVersion");
 
@@ -8213,6 +8329,7 @@ async function runTool(
         publicationId,
         ops,
         ...(pageId ? { pageId } : {}),
+        ...(slug ? { slug } : {}),
         ...(baseVersion !== undefined ? { baseVersion } : {})
       },
       options
@@ -8245,19 +8362,48 @@ async function runTool(
     );
   }
 
-  if (toolName === "site.presets_list") {
+  if (toolName === "site.section_templates_list") {
     const publicationId = readRequiredString(args, "publicationId");
 
-    const result = await callTrpc<{ presets: SitePresetRecord[] }>(
-      "publication.sitePresets",
+    const result = await callTrpc<{ templates: SiteTemplateRecord[] }>(
+      "publication.siteSectionTemplates",
       { publicationId },
       options,
       "query"
     );
 
     return makeToolResult(
-      `Loaded ${result.presets.length} section presets`,
-      { presets: result.presets }
+      `Loaded ${result.templates.length} section templates`,
+      { templates: result.templates }
+    );
+  }
+
+  if (toolName === "site.footer_templates_list") {
+    const publicationId = readRequiredString(args, "publicationId");
+    const result = await callTrpc<{
+      templates: Array<{ id: string; name: string; description: string }>;
+    }>("publication.siteFooterTemplates", { publicationId }, options, "query");
+
+    return makeToolResult(
+      `Loaded ${result.templates.length} footer templates. Apply one with the set_footer_template op.`,
+      { templates: result.templates }
+    );
+  }
+
+  if (toolName === "site.navbar_templates_list") {
+    const publicationId = readRequiredString(args, "publicationId");
+    const result = await callTrpc<{
+      templates: Array<{
+        id: string;
+        name: string;
+        description: string;
+        navbarMobile: string;
+      }>;
+    }>("publication.siteNavbarTemplates", { publicationId }, options, "query");
+
+    return makeToolResult(
+      `Loaded ${result.templates.length} navbar templates. Apply one with the set_navbar_template op.`,
+      { templates: result.templates }
     );
   }
 

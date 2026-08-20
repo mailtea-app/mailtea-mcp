@@ -37,10 +37,12 @@ A page document:
 
 - **Sections** are the horizontal bands of the page, top to bottom. A section is
   `{id, type:"section", blocks:[]}` plus optional `style` / `layout`.
-- **Blocks** are discriminated on `type`. There are 18:
+- **Blocks** are discriminated on `type`. There are 19:
   - text: `heading` (`level` 1-6, `text`), `text` (`text`), `richText` (`html`)
   - action: `button` (`label`, `href`), `link` (`label`, `href`)
-  - media: `image` (`src`, `alt`, `href?`), `embed` (`html`, sandboxed), `icon` (`name`, `sizePx`)
+  - media: `image` (`src`, `alt`, `href?`), `embed` (`html`, sandboxed),
+    `logo` (`src` — empty inherits the publication's logo — `alt`, `heightPx`, `href`),
+    `icon` (`name`, `sizePx`)
   - spacing: `divider`, `spacer` (`heightPx`)
   - forms: `subscribeForm` (`headline`, `body`, `buttonText`, `placeholder`, `successMessage`),
     `contactForm`, `unsubscribeForm`
