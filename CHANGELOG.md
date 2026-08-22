@@ -4,6 +4,11 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
 
+- Changed: `email.analytics` reports `open_rate` and `click_rate` against
+  delivered mail (`sent - bounced`) rather than everything sent, so both read
+  higher than before for the same data. `delivery_rate` and `bounce_rate` are
+  unchanged. The tool description now states which denominator each rate uses.
+
 - Added: `email.get` reports why a send failed. The retrieved email carries
   `error` and `failed_at`, and a failure now appears in the tool's summary line
   rather than only in the payload, so an agent asking about a failed send reads

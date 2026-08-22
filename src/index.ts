@@ -2993,7 +2993,7 @@ export const MCP_TOOLS = [
   {
     name: "email.analytics",
     description:
-      "Aggregate transactional email metrics over an optional date window: totals, delivered/bounced/opened/clicked counts, per-status counts, and delivery/open/click/bounce rates.",
+      "Aggregate transactional email metrics over an optional date window: totals, delivered/bounced/opened/clicked counts, per-status counts, and delivery/open/click/bounce rates. Delivery and bounce rates are measured against everything sent; open and click rates exclude bounced mail, which was never open-able.",
     inputSchema: {
       type: "object",
       properties: {
