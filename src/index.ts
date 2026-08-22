@@ -2911,7 +2911,7 @@ export const MCP_TOOLS = [
         emails: {
           type: "array",
           description:
-            "1-100 email objects: { from, to, subject, html?|text?|template?, cc?, bcc?, reply_to?, tags?, headers? }.",
+            "1-100 email objects: { from, to, subject, html?|text?|template?, cc?, bcc?, reply_to?, tracking_open?, tracking_click?, tags?, headers? }. Set tracking_open/tracking_click false to send without an open pixel or rewritten links; a domain with tracking switched off cannot be overridden here.",
           items: { type: "object" }
         }
       },
