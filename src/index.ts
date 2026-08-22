@@ -2921,7 +2921,7 @@ export const MCP_TOOLS = [
   {
     name: "email.get",
     description:
-      "Retrieve a transactional email by id with its delivery status (last_event) and tracking counters (open_count, click_count).",
+      "Retrieve a transactional email by id with its delivery status (last_event), the reason it failed if it did (error, failed_at), and tracking counters (open_count, click_count).",
     inputSchema: {
       type: "object",
       properties: { id: { type: "string" } },
@@ -6794,8 +6794,12 @@ async function runTool(
       options
     );
 
+    // A failed send says why in the summary line, not only in the payload: the
+    // reason is the whole point of asking, and an agent reading the first line
+    // should not have to go digging to find it.
+    const failure = email.error ? ` — ${String(email.error)}` : "";
     return makeToolResult(
-      `Email ${id}: ${String(email.last_event ?? "unknown")} (opens ${String(
+      `Email ${id}: ${String(email.last_event ?? "unknown")}${failure} (opens ${String(
         email.open_count ?? 0
       )}, clicks ${String(email.click_count ?? 0)})`,
       { email }

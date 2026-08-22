@@ -4,6 +4,11 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
 
+- Added: `email.get` reports why a send failed. The retrieved email carries
+  `error` and `failed_at`, and a failure now appears in the tool's summary line
+  rather than only in the payload, so an agent asking about a failed send reads
+  the reason first.
+
 - Added: `image/svg+xml` is an accepted asset type for `assets.upload` — SVG
   logos and marks upload like any raster. The public asset route serves every
   asset with `Content-Security-Policy: sandbox`, which is what makes hosting
