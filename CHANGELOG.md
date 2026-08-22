@@ -4,6 +4,8 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
 
+## 0.10.0 (2026-08-22)
+
 - Changed: `email.analytics` reports `open_rate` and `click_rate` against
   delivered mail (`sent - bounced`) rather than everything sent, so both read
   higher than before for the same data. `delivery_rate` and `bounce_rate` are
