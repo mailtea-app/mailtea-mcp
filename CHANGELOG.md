@@ -4,6 +4,12 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
 
+- Added: `tracking_open` and `tracking_click` on `email.send` and `email.batch`,
+  and `open_tracking` / `click_tracking` on `domain.update`. An agent can now
+  send an untracked message, or turn tracking off for a whole sending domain —
+  which governs campaigns as well as transactional mail, and cannot be undone by
+  an individual send.
+
 ## 0.10.0 (2026-08-22)
 
 - Changed: `email.analytics` reports `open_rate` and `click_rate` against

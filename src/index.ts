@@ -3162,14 +3162,23 @@ export const MCP_TOOLS = [
   },
   {
     name: "domain.update",
-    description: "Update a domain's purpose (email/site/both) or primary flag.",
+    description:
+      "Update a domain's purpose (email/site/both), primary flag, or tracking policy. Turning open_tracking or click_tracking off stops Mailtea measuring opens or clicks for EVERY message from this domain — a single send cannot re-enable it.",
     inputSchema: {
       type: "object",
       properties: {
         publicationId: { type: "string" },
         domainId: { type: "string" },
         purpose: { type: "string", enum: ["email", "site", "both"] },
-        is_primary: { type: "boolean" }
+        is_primary: { type: "boolean" },
+        open_tracking: {
+          type: "boolean",
+          description: "Whether mail from this domain may carry an open-tracking pixel."
+        },
+        click_tracking: {
+          type: "boolean",
+          description: "Whether links in mail from this domain are rewritten for click tracking."
+        }
       },
       required: ["publicationId", "domainId"]
     }
@@ -4953,6 +4962,8 @@ const EMAIL_SEND_FIELDS = [
   "cc",
   "bcc",
   "reply_to",
+  "tracking_open",
+  "tracking_click",
   "scheduled_at",
   "tags",
   "headers",
@@ -7083,16 +7094,38 @@ async function runTool(
     const domainId = readRequiredString(args, "domainId");
     const purpose = asOptionalString(args.purpose);
     const isPrimary = readOptionalBoolean(args, "is_primary");
-    const result = await callRestApi<{ id: string; name: string; purpose: string }>(
+    const openTracking = readOptionalBoolean(args, "open_tracking");
+    const clickTracking = readOptionalBoolean(args, "click_tracking");
+    const result = await callRestApi<{
+      id: string;
+      name: string;
+      purpose: string;
+      open_tracking?: boolean;
+      click_tracking?: boolean;
+    }>(
       "PATCH",
       `/v1/domains/${encodeURIComponent(domainId)}?publication_id=${encodeURIComponent(publicationId)}`,
       {
         ...(purpose ? { purpose } : {}),
-        ...(isPrimary !== undefined ? { is_primary: isPrimary } : {})
+        ...(isPrimary !== undefined ? { is_primary: isPrimary } : {}),
+        // Only sent when named, so updating the purpose never silently
+        // re-enables tracking someone switched off.
+        ...(openTracking !== undefined ? { open_tracking: openTracking } : {}),
+        ...(clickTracking !== undefined ? { click_tracking: clickTracking } : {})
       },
       options
     );
-    return makeToolResult(`Domain ${result.name} updated (purpose: ${result.purpose}).`, result);
+    // Tracking is stated back only when it was the thing being changed —
+    // an agent that just set it should see it took, without every unrelated
+    // purpose change reciting the whole policy.
+    const trackingNote =
+      openTracking !== undefined || clickTracking !== undefined
+        ? `, tracking: opens ${result.open_tracking ? "on" : "off"}, clicks ${result.click_tracking ? "on" : "off"}`
+        : "";
+    return makeToolResult(
+      `Domain ${result.name} updated (purpose: ${result.purpose}${trackingNote}).`,
+      result
+    );
   }
 
   if (toolName === "domain.delete") {
