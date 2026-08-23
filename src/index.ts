@@ -3163,7 +3163,7 @@ export const MCP_TOOLS = [
   {
     name: "domain.update",
     description:
-      "Update a domain's purpose (email/site/both), primary flag, or tracking policy. Turning open_tracking or click_tracking off stops Mailtea measuring opens or clicks for EVERY message from this domain — a single send cannot re-enable it.",
+      "Update a domain's purpose (email/site/both), primary flag, tracking policy, or custom return-path. Turning open_tracking or click_tracking off stops Mailtea measuring opens or clicks for EVERY message from this domain — a single send cannot re-enable it. Setting custom_return_path delegates a subdomain as the envelope sender so SPF aligns with this domain; it requires two DNS records and reports back in the domain's records list.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3178,6 +3178,11 @@ export const MCP_TOOLS = [
         click_tracking: {
           type: "boolean",
           description: "Whether links in mail from this domain are rewritten for click tracking."
+        },
+        custom_return_path: {
+          description:
+            "Custom return-path (MAIL FROM). true delegates the conventional bounce.<domain> subdomain; a string names the subdomain explicitly and must sit under this domain; false reverts to the default return-path. Until the delegated subdomain's DNS resolves, mail still sends on the default return-path — this never blocks delivery.",
+          anyOf: [{ type: "boolean" }, { type: "string" }, { type: "null" }]
         }
       },
       required: ["publicationId", "domainId"]
@@ -7096,12 +7101,24 @@ async function runTool(
     const isPrimary = readOptionalBoolean(args, "is_primary");
     const openTracking = readOptionalBoolean(args, "open_tracking");
     const clickTracking = readOptionalBoolean(args, "click_tracking");
+    // Accepts a boolean OR the subdomain by name, so an agent can either take
+    // the conventional `bounce.<domain>` or place it deliberately.
+    const rawReturnPath = args.custom_return_path;
+    const customReturnPath =
+      rawReturnPath === undefined
+        ? undefined
+        : typeof rawReturnPath === "string" || typeof rawReturnPath === "boolean"
+          ? rawReturnPath
+          : null;
     const result = await callRestApi<{
       id: string;
       name: string;
       purpose: string;
       open_tracking?: boolean;
       click_tracking?: boolean;
+      custom_return_path?: string | null;
+      custom_return_path_status?: string | null;
+      records?: Array<{ record: string; name: string; value: string; purpose?: string }>;
     }>(
       "PATCH",
       `/v1/domains/${encodeURIComponent(domainId)}?publication_id=${encodeURIComponent(publicationId)}`,
@@ -7111,7 +7128,8 @@ async function runTool(
         // Only sent when named, so updating the purpose never silently
         // re-enables tracking someone switched off.
         ...(openTracking !== undefined ? { open_tracking: openTracking } : {}),
-        ...(clickTracking !== undefined ? { click_tracking: clickTracking } : {})
+        ...(clickTracking !== undefined ? { click_tracking: clickTracking } : {}),
+        ...(customReturnPath !== undefined ? { custom_return_path: customReturnPath } : {})
       },
       options
     );
@@ -7122,8 +7140,22 @@ async function runTool(
       openTracking !== undefined || clickTracking !== undefined
         ? `, tracking: opens ${result.open_tracking ? "on" : "off"}, clicks ${result.click_tracking ? "on" : "off"}`
         : "";
+    // An agent that just enabled this cannot act on it without the DNS records,
+    // and it has no other way to discover them — so they are stated inline
+    // rather than left for a follow-up domain.get.
+    const returnPathNote =
+      customReturnPath !== undefined && result.custom_return_path
+        ? `. Return-path ${result.custom_return_path} is ${result.custom_return_path_status ?? "pending"} — publish these records: ${(
+            result.records ?? []
+          )
+            .filter((record) => record.purpose === "return-path")
+            .map((record) => `${record.record} ${record.name} -> ${record.value}`)
+            .join("; ")}. Mail keeps sending on the default return-path until they resolve`
+        : customReturnPath !== undefined
+          ? ". Return-path reverted to the default"
+          : "";
     return makeToolResult(
-      `Domain ${result.name} updated (purpose: ${result.purpose}${trackingNote}).`,
+      `Domain ${result.name} updated (purpose: ${result.purpose}${trackingNote})${returnPathNote}.`,
       result
     );
   }

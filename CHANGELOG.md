@@ -4,6 +4,17 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
 
+- Added: `custom_return_path` on `domain.update`. An agent can delegate a
+  subdomain as the envelope sender so SPF aligns with the customer's own domain
+  rather than ours. The tool states the DNS records to publish inline, since an
+  agent has no other way to discover them, and mail keeps sending on the default
+  return-path until they resolve.
+
+- Changed: `email.send` and `email.batch` validate `to` / `cc` / `bcc` as email
+  addresses and answer `400` on a malformed one, rather than accepting it and
+  failing at the provider. `"Name" <address>` still works, and an empty `cc` or
+  `bcc` array still means "no cc".
+
 - Added: `tracking_open` and `tracking_click` on `email.send` and `email.batch`,
   and `open_tracking` / `click_tracking` on `domain.update`. An agent can now
   send an untracked message, or turn tracking off for a whole sending domain —
