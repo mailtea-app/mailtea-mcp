@@ -2,7 +2,11 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
-## Unreleased
+## 0.11.0 (2026-08-24)
+
+- Changed: `email.get` returns `dropped_recipients`, naming any recipient the
+  message did not reach and why, so an agent can tell a partially-delivered
+  send from a fully-delivered one. `to`/`cc`/`bcc` remain what was asked for.
 
 - Added: `custom_return_path` on `domain.update`. An agent can delegate a
   subdomain as the envelope sender so SPF aligns with the customer's own domain

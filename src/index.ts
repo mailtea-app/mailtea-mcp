@@ -1617,7 +1617,7 @@ const SITE_OP_SCHEMA = {
  * client that asked was told the wrong number; `version.test.ts` now ties the
  * two together.
  */
-export const SERVER_VERSION = "0.10.0";
+export const SERVER_VERSION = "0.11.0";
 
 export const MCP_TOOLS = [
   {
@@ -2921,7 +2921,7 @@ export const MCP_TOOLS = [
   {
     name: "email.get",
     description:
-      "Retrieve a transactional email by id with its delivery status (last_event), the reason it failed if it did (error, failed_at), and tracking counters (open_count, click_count).",
+      "Retrieve a transactional email by id with its delivery status (last_event), the reason it failed if it did (error, failed_at), tracking counters (open_count, click_count), and dropped_recipients — anyone the message did not reach and why. to/cc/bcc are what was ASKED for; a partially-delivered send looks identical to a fully-delivered one unless you read dropped_recipients.",
     inputSchema: {
       type: "object",
       properties: { id: { type: "string" } },
