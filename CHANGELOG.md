@@ -2,6 +2,31 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
+## 0.11.2 (2026-08-25)
+
+- Documented: the API now enforces your plan's analytics retention window on
+  `from_date`. It is clamped to 30 days on most plans and 90 on Scale and
+  Enterprise; a value reaching further back returns data from the start of that
+  window rather than an error, and omitting it returns the window rather than
+  all time. No code change is required — this release only makes the behaviour
+  visible where you read it.
+- Changed: the list and analytics responses now report the window actually used
+  in `from_date`, so a clamped request is visible rather than silently short.
+- Changed: the `from_date` description on `email.list` and `email.analytics`
+  says so, because an agent only discovers what the schema advertises.
+
+## 0.11.1 (2026-08-25)
+
+- Fixed: `analytics.issue_performance`, `analytics.issue_trend` and the three
+  issue CSV exports failed for every call that did not pass `range`. They
+  defaulted to `all`, which the server stopped accepting — so an agent using the
+  documented default got a validation error, and the tool schemas advertised
+  `all` as a legal choice on top of that. The default is now `30d`, and `all` is
+  gone from the type, the parser, its error message, the schemas and their
+  descriptions. Present since 0.1.0 — `?? "all"` landed 2026-02-20 and the server
+  dropped `all` on 2026-06-20, while this package was still 0.1.0. Every
+  published version has carried it: 0.1.0, 0.1.1, 0.1.2, 0.2.0 and onward.
+
 ## 0.11.0 (2026-08-24)
 
 - Changed: `email.get` returns `dropped_recipients`, naming any recipient the

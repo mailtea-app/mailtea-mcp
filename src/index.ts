@@ -1,3 +1,17 @@
+/**
+ * Analytics windows the server accepts, and the default when a tool omits one.
+ *
+ * LITERALS, not an import. `packages/mcp` deliberately takes no runtime
+ * dependency on `@mailtea/contracts` — it is mirrored to a standalone repo that
+ * has no workspace to resolve, and importing one here breaks that mirror's
+ * build ("src/index.ts imports a workspace package"). These must be updated in
+ * lockstep with `ISSUE_ANALYTICS_RANGES` / `DEFAULT_ISSUE_ANALYTICS_RANGE`
+ * there; `mcp-range-parity.test.ts` imports the real ones and fails on drift,
+ * and tests are stripped from the mirror so it may import freely.
+ */
+export const ISSUE_ANALYTICS_RANGES = ["24h", "7d", "30d"] as const;
+export const DEFAULT_ISSUE_ANALYTICS_RANGE = "30d" as const;
+
 export type JsonRpcId = string | number | null;
 
 export type JsonRpcRequest = {
@@ -223,7 +237,7 @@ type IssuePollResults = {
 type IssueAnalytics = {
   issueId: string;
   publicationId: string;
-  range: "24h" | "7d" | "30d" | "all";
+  range: IssueAnalyticsRange;
   since: string | null;
   opens: {
     total: number;
@@ -249,7 +263,7 @@ type IssueAnalyticsCsv = {
 type IssueAnalyticsTrend = {
   issueId: string;
   publicationId: string;
-  range: "24h" | "7d" | "30d" | "all";
+  range: IssueAnalyticsRange;
   since: string | null;
   points: Array<{
     date: string;
@@ -353,7 +367,13 @@ type SectionPackRevisionRecord = {
   createdAt: string;
 };
 
-type IssueAnalyticsRange = "24h" | "7d" | "30d" | "all";
+/**
+ * Imported, not restated. MCP kept its own copy of this union; when `all` was
+ * removed from the server's enum the copy kept it, and five tools defaulted to
+ * a value the server rejects for nine releases. A shared constant makes that a
+ * compile error instead of a 400 an agent discovers at runtime.
+ */
+type IssueAnalyticsRange = (typeof ISSUE_ANALYTICS_RANGES)[number];
 
 type PublicationDomainRecord = {
   id: string;
@@ -1617,7 +1637,7 @@ const SITE_OP_SCHEMA = {
  * client that asked was told the wrong number; `version.test.ts` now ties the
  * two together.
  */
-export const SERVER_VERSION = "0.11.0";
+export const SERVER_VERSION = "0.11.2";
 
 export const MCP_TOOLS = [
   {
@@ -2430,8 +2450,8 @@ export const MCP_TOOLS = [
         issueId: { type: "string" },
         range: {
           type: "string",
-          enum: ["24h", "7d", "30d", "all"],
-          description: "Analytics window. Defaults to all."
+          enum: [...ISSUE_ANALYTICS_RANGES],
+          description: "Analytics window. Defaults to 30d."
         }
       },
       required: ["publicationId", "issueId"]
@@ -2447,8 +2467,8 @@ export const MCP_TOOLS = [
         issueId: { type: "string" },
         range: {
           type: "string",
-          enum: ["24h", "7d", "30d", "all"],
-          description: "Analytics window. Defaults to all."
+          enum: [...ISSUE_ANALYTICS_RANGES],
+          description: "Analytics window. Defaults to 30d."
         }
       },
       required: ["publicationId", "issueId"]
@@ -2466,7 +2486,7 @@ export const MCP_TOOLS = [
         },
         range: {
           type: "string",
-          enum: ["24h", "7d", "30d", "all"],
+          enum: [...ISSUE_ANALYTICS_RANGES],
           description: "Analytics window. Defaults to 7d."
         }
       }
@@ -2482,8 +2502,8 @@ export const MCP_TOOLS = [
         issueId: { type: "string" },
         range: {
           type: "string",
-          enum: ["24h", "7d", "30d", "all"],
-          description: "Analytics window. Defaults to all."
+          enum: [...ISSUE_ANALYTICS_RANGES],
+          description: "Analytics window. Defaults to 30d."
         },
         exportType: {
           type: "string",
@@ -2504,8 +2524,8 @@ export const MCP_TOOLS = [
         issueId: { type: "string" },
         range: {
           type: "string",
-          enum: ["24h", "7d", "30d", "all"],
-          description: "Analytics window. Defaults to all."
+          enum: [...ISSUE_ANALYTICS_RANGES],
+          description: "Analytics window. Defaults to 30d."
         }
       },
       required: ["publicationId", "issueId"]
@@ -2521,8 +2541,8 @@ export const MCP_TOOLS = [
         issueId: { type: "string" },
         range: {
           type: "string",
-          enum: ["24h", "7d", "30d", "all"],
-          description: "Analytics window. Defaults to all."
+          enum: [...ISSUE_ANALYTICS_RANGES],
+          description: "Analytics window. Defaults to 30d."
         }
       },
       required: ["publicationId", "issueId"]
@@ -2985,7 +3005,11 @@ export const MCP_TOOLS = [
         tag_name: { type: "string", description: "Filter by a custom tag name." },
         tag_value: { type: "string", description: "Filter by a custom tag value (use with tag_name)." },
         search: { type: "string", description: "Case-insensitive substring match on recipient, sender, or subject." },
-        from_date: { type: "string", description: "ISO 8601 lower bound on created_at." },
+        from_date: {
+          type: "string",
+          description:
+            "ISO 8601 lower bound on created_at. Clamped to the plan's analytics retention window (30 days on most plans, 90 on Scale/Enterprise); reaching further back returns data from the start of that window, and omitting this returns the window rather than all time."
+        },
         to_date: { type: "string", description: "ISO 8601 upper bound on created_at." }
       }
     }
@@ -2997,7 +3021,11 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        from_date: { type: "string", description: "ISO 8601 lower bound on created_at." },
+        from_date: {
+          type: "string",
+          description:
+            "ISO 8601 lower bound on created_at. Clamped to the plan's analytics retention window (30 days on most plans, 90 on Scale/Enterprise); reaching further back returns data from the start of that window, and omitting this returns the window rather than all time."
+        },
         to_date: { type: "string", description: "ISO 8601 upper bound on created_at." }
       }
     }
@@ -4382,11 +4410,14 @@ function parseIssueAnalyticsRange(
     return undefined;
   }
 
-  if (value === "24h" || value === "7d" || value === "30d" || value === "all") {
-    return value;
+  // Narrowed through the shared list rather than an `||` chain: a value added
+  // or removed there changes what this accepts with no edit here.
+  const match = ISSUE_ANALYTICS_RANGES.find((range) => range === value);
+  if (match) {
+    return match;
   }
 
-  throw new Error(`Argument ${key} must be one of: 24h, 7d, 30d, all`);
+  throw new Error(`Argument ${key} must be one of: ${ISSUE_ANALYTICS_RANGES.join(", ")}`);
 }
 
 function readContactStatus(
@@ -6174,7 +6205,7 @@ async function runTool(
   if (toolName === "analytics.issue_performance") {
     const publicationId = readRequiredString(args, "publicationId");
     const issueId = readRequiredString(args, "issueId");
-    const range = readIssueAnalyticsRange(args, "range") ?? "all";
+    const range = readIssueAnalyticsRange(args, "range") ?? DEFAULT_ISSUE_ANALYTICS_RANGE;
     const analytics = await callTrpc<IssueAnalytics>(
       "issue.analytics",
       {
@@ -6195,7 +6226,7 @@ async function runTool(
   if (toolName === "analytics.issue_export_csv") {
     const publicationId = readRequiredString(args, "publicationId");
     const issueId = readRequiredString(args, "issueId");
-    const range = readIssueAnalyticsRange(args, "range") ?? "all";
+    const range = readIssueAnalyticsRange(args, "range") ?? DEFAULT_ISSUE_ANALYTICS_RANGE;
     const exportType = readIssueAnalyticsExportType(args, "exportType") ?? "combined";
     const exported = await callTrpc<IssueAnalyticsCsv>(
       "issue.analyticsExportCsv",
@@ -6218,7 +6249,7 @@ async function runTool(
   if (toolName === "analytics.issue_export_performance_csv") {
     const publicationId = readRequiredString(args, "publicationId");
     const issueId = readRequiredString(args, "issueId");
-    const range = readIssueAnalyticsRange(args, "range") ?? "all";
+    const range = readIssueAnalyticsRange(args, "range") ?? DEFAULT_ISSUE_ANALYTICS_RANGE;
     const exported = await callTrpc<IssueAnalyticsCsv>(
       "issue.analyticsExportCsv",
       {
@@ -6240,7 +6271,7 @@ async function runTool(
   if (toolName === "analytics.issue_export_polls_csv") {
     const publicationId = readRequiredString(args, "publicationId");
     const issueId = readRequiredString(args, "issueId");
-    const range = readIssueAnalyticsRange(args, "range") ?? "all";
+    const range = readIssueAnalyticsRange(args, "range") ?? DEFAULT_ISSUE_ANALYTICS_RANGE;
     const exported = await callTrpc<IssueAnalyticsCsv>(
       "issue.analyticsExportCsv",
       {
@@ -6262,7 +6293,7 @@ async function runTool(
   if (toolName === "analytics.issue_trend") {
     const publicationId = readRequiredString(args, "publicationId");
     const issueId = readRequiredString(args, "issueId");
-    const range = readIssueAnalyticsRange(args, "range") ?? "all";
+    const range = readIssueAnalyticsRange(args, "range") ?? DEFAULT_ISSUE_ANALYTICS_RANGE;
     const trend = await callTrpc<IssueAnalyticsTrend>(
       "issue.analyticsTrend",
       {
