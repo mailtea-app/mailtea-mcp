@@ -2,6 +2,14 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
+## Unreleased
+
+- Changed: `contact.set_properties` now accepts `key` as well as `propertyId` on
+  each value, and its description explains what the tool is for. Agents only
+  discover what the schema advertises, and requiring an opaque id lookup first
+  was the friction that kept this tool unused. An empty `value` clears the
+  property and restores its fallback.
+
 ## 0.11.2 (2026-08-25)
 
 - Documented: the API now enforces your plan's analytics retention window on

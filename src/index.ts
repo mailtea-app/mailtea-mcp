@@ -3525,7 +3525,10 @@ export const MCP_TOOLS = [
   {
     name: "contact.set_properties",
     description:
-      "Set a contact's custom property values. Each value references a property by propertyId (from contact_property.list/create).",
+      "Set a contact's custom property values — the data behind {{contact.<key>}} merge tags. " +
+      "Defining a property (contact_property.create) only creates the field; this puts a value on a contact. " +
+      "Identify each value by `key` (the name you write in the template) or by `propertyId` — exactly one. " +
+      "An empty `value` CLEARS the property, which makes its fallback_value apply again on the next send.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3536,10 +3539,21 @@ export const MCP_TOOLS = [
           items: {
             type: "object",
             properties: {
-              propertyId: { type: "string" },
-              value: { type: "string" }
+              key: {
+                type: "string",
+                description:
+                  "The property key, e.g. `first_name` — the same name used in the template as {{contact.first_name}}. Give this OR propertyId, not both."
+              },
+              propertyId: {
+                type: "string",
+                description: "The property's id, from contact_property.list/create. Give this OR key, not both."
+              },
+              value: {
+                type: "string",
+                description: "The value to store. Empty string clears it and restores the fallback."
+              }
             },
-            required: ["propertyId", "value"]
+            required: ["value"]
           }
         }
       },
