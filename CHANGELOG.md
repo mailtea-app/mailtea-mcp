@@ -2,8 +2,46 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
-## Unreleased
+## 0.12.0 (2026-09-03)
 
+- Added: `domain.claim`, `domain.claim_get`, `domain.claim_verify` and
+  `domain.claim_cancel`. When `domain.create` is refused with code
+  `domain_held_elsewhere`, another publication holds the host — publish one TXT record
+  to prove you control its DNS and the domain moves to you. The claim expires
+  after 72 hours, and verifying before the record has propagated is safe: the
+  claim stays pending with the same record.
+- Added: `domain.create` advertises `region`, `tls` and `tracking_subdomain`.
+  A domain's region is fixed at creation and picks where its mail is sent from;
+  `tls: "enforced"` bounces rather than delivering in the clear; a tracking
+  subdomain serves opens and clicks from your own domain. Agents only discover
+  what the schema advertises, and none of this existed for them before.
+- Added: `domain.update` takes `tls` and `tracking_subdomain`. It deliberately
+  does NOT take `region` — changing it is refused, and the fix is to delete the
+  domain and add it again.
+- Added: `domain.list` filters on `region` and `status`.
+- Changed: each row in a domain's `records` now says what it is FOR in `record`
+  (`Ownership`, `DKIM`, `SPF`, `MX`, `Return-Path`, `Tracking`), carries
+  `ttl: "Auto"`, and reports its OWN status rather than the domain's. `type`
+  still holds the DNS type and `purpose` is unchanged.
+- Fixed: `domain.update`'s return-path note printed the record's role where the
+  DNS type belonged, so an operator was told to create a record of type
+  "Return-Path". It now names the type.
+- Fixed: `site.publish` now enforces the published-custom-page cap too. It
+  promoted every draft page with no cap check at all, so the limit `site.page_upsert`
+  enforces was bypassable by building custom pages as drafts and publishing them —
+  which is the normal workflow. An over-cap publish is refused whole, so no subset
+  goes live, and the message names the limit.
+- Fixed: `site.page_upsert` can create custom pages. Custom pages shipped on
+  2026-08-18 and the tool never learned about them — `kind` had no `custom`
+  value and the description said flatly that free landing pages did not exist —
+  so an agent could not make one at all, for a fortnight after operators could.
+  Agents only discover what the schema advertises.
+- Changed: a NEW custom page created without `status` is now a DRAFT. It was
+  published, because the column defaults that way — which also let it slip past
+  the plan's published-page cap. Building stays unlimited on every plan;
+  publishing is capped (free 1, hobby 5, pro 25) and an over-cap publish is
+  refused with a message naming the limit. Pass `status: "published"` for the
+  old behaviour, and expect a refusal once you are at your plan's limit.
 - Changed: `contact.set_properties` now accepts `key` as well as `propertyId` on
   each value, and its description explains what the tool is for. Agents only
   discover what the schema advertises, and requiring an opaque id lookup first

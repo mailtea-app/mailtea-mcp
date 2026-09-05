@@ -1637,7 +1637,7 @@ const SITE_OP_SCHEMA = {
  * client that asked was told the wrong number; `version.test.ts` now ties the
  * two together.
  */
-export const SERVER_VERSION = "0.11.2";
+export const SERVER_VERSION = "0.12.0";
 
 export const MCP_TOOLS = [
   {
@@ -3135,7 +3135,7 @@ export const MCP_TOOLS = [
   {
     name: "domain.create",
     description:
-      "Register an email sending domain for a publication. Returns the DNS records (in 'records') the operator must add — an ownership TXT record, a branded DKIM TXT record, and (for email domains) a receiving MX record. Set purpose to 'email' (or 'both') to use it as a sending 'from' domain; both the ownership TXT and the DKIM TXT must verify before the domain can send.",
+      "Register an email sending domain for a publication. Returns the DNS records (in 'records') the operator must add — each row's 'record' names what it is for (Ownership, DKIM, SPF, MX, Return-Path, Tracking), 'type' is the DNS type, and 'status' is that record's own state. Set purpose to 'email' (or 'both') to use it as a sending 'from' domain; both the ownership TXT and the DKIM TXT must verify before the domain can send. Pick the region closest to your recipients — it is fixed at creation, and moving a domain means deleting and re-adding it.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3146,19 +3146,49 @@ export const MCP_TOOLS = [
           enum: ["email", "site", "both"],
           description: "Use 'email' or 'both' for a sending domain. Defaults to 'site'."
         },
-        is_primary: { type: "boolean" }
+        is_primary: { type: "boolean" },
+        // Hand-written rather than imported: this package ships with zero
+        // runtime dependencies. `domain-region-parity.test.ts` fails if this
+        // enum and the platform catalog ever drift apart.
+        region: {
+          type: "string",
+          enum: ["us-west-1", "eu-west-1", "ap-southeast-1", "ap-southeast-2"],
+          description:
+            "Where this domain's mail is sent from. Defaults to the deployment's default region. CANNOT be changed later — to move a domain, delete it and add it again. A region this deployment has not enabled is refused with code 'region_not_available'."
+        },
+        tls: {
+          type: "string",
+          enum: ["opportunistic", "enforced"],
+          description:
+            "'enforced' means a recipient server that will not negotiate TLS gets a bounce instead of a plaintext delivery. Deliberately trades a little deliverability for the guarantee. Defaults to 'opportunistic'. A region that cannot enforce it refuses with code 'tls_not_available'."
+        },
+        tracking_subdomain: {
+          type: "string",
+          description:
+            "Serve open-pixel and click-tracking links from your own domain, e.g. 'links' gives links.acme.com. Adds a Tracking CNAME to 'records'; links stay on the platform host until it verifies. Letters, digits and hyphens only; a reserved label, or the one the return-path uses, is refused with code 'tracking_subdomain_invalid'."
+        }
       },
       required: ["publicationId", "name"]
     }
   },
   {
     name: "domain.list",
-    description: "List email/site domains for a publication.",
+    description: "List email/site domains for a publication, optionally filtered by region or status.",
     inputSchema: {
       type: "object",
       properties: {
         publicationId: { type: "string" },
-        limit: { type: "number", description: "Max results (1-100, default 20)." }
+        limit: { type: "number", description: "Max results (1-100, default 20)." },
+        region: {
+          type: "string",
+          enum: ["us-west-1", "eu-west-1", "ap-southeast-1", "ap-southeast-2"],
+          description: "Only domains sending from this region."
+        },
+        status: {
+          type: "string",
+          enum: ["pending", "verified"],
+          description: "Only domains in this state."
+        }
       },
       required: ["publicationId"]
     }
@@ -3191,7 +3221,7 @@ export const MCP_TOOLS = [
   {
     name: "domain.update",
     description:
-      "Update a domain's purpose (email/site/both), primary flag, tracking policy, or custom return-path. Turning open_tracking or click_tracking off stops Mailtea measuring opens or clicks for EVERY message from this domain — a single send cannot re-enable it. Setting custom_return_path delegates a subdomain as the envelope sender so SPF aligns with this domain; it requires two DNS records and reports back in the domain's records list.",
+      "Update a domain's purpose (email/site/both), primary flag, tracking policy, TLS policy, tracking subdomain, or custom return-path. A domain's REGION cannot be changed — delete it and add it again in the new region. Turning open_tracking or click_tracking off stops Mailtea measuring opens or clicks for EVERY message from this domain — a single send cannot re-enable it. Setting custom_return_path delegates a subdomain as the envelope sender so SPF aligns with this domain; it requires two DNS records and reports back in the domain's records list.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3211,6 +3241,19 @@ export const MCP_TOOLS = [
           description:
             "Custom return-path (MAIL FROM). true delegates the conventional bounce.<domain> subdomain; a string names the subdomain explicitly and must sit under this domain; false reverts to the default return-path. Until the delegated subdomain's DNS resolves, mail still sends on the default return-path — this never blocks delivery.",
           anyOf: [{ type: "boolean" }, { type: "string" }, { type: "null" }]
+        },
+        // Deliberately no `region`: it is immutable, and advertising it would
+        // teach every agent to earn a 400.
+        tls: {
+          type: "string",
+          enum: ["opportunistic", "enforced"],
+          description:
+            "'enforced' means a recipient server that will not negotiate TLS gets a bounce instead of a plaintext delivery. Refused with code 'tls_not_available' when this domain's region cannot enforce it."
+        },
+        tracking_subdomain: {
+          type: "string",
+          description:
+            "Serve tracked links from your own domain, e.g. 'links' gives links.acme.com. Replaces any subdomain already chosen; links already sent on the old host keep working only while its DNS stays. A reserved label, or the one the return-path uses, is refused with code 'tracking_subdomain_invalid'."
         }
       },
       required: ["publicationId", "domainId"]
@@ -3226,6 +3269,68 @@ export const MCP_TOOLS = [
         domainId: { type: "string" }
       },
       required: ["publicationId", "domainId"]
+    }
+  },
+  // --- Domain claiming (REST /v1/domains/claim) ----------------------------
+  // The recovery path for `domain.create` refused with code
+  // 'domain_held_elsewhere': another publication holds this host. Claiming
+  // needs control of the domain's DNS and nothing else.
+  {
+    name: "domain.claim",
+    description:
+      "Claim a domain that another publication currently holds. Use this ONLY after domain.create was refused with code 'domain_held_elsewhere'. Returns one TXT record in 'records' — the operator must publish it in the domain's DNS to prove they control it, then call domain.claim_verify. The claim expires if it is not verified within 72 hours. Completing a claim releases the other publication's domain: their sending stops, and they are notified by email that the host was released and told how to claim it back. Do not open one for a domain you do not control.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" },
+        name: { type: "string", description: "Domain host to claim, e.g. 'acme.com'." },
+        region: {
+          type: "string",
+          enum: ["us-west-1", "eu-west-1", "ap-southeast-1", "ap-southeast-2"],
+          description:
+            "Where the claimed domain will send from once the claim completes. Fixed at that point, like any domain's region."
+        }
+      },
+      required: ["publicationId", "name"]
+    }
+  },
+  {
+    name: "domain.claim_get",
+    description:
+      "Poll a domain claim. 'status' is 'pending', 'completed' or 'failed'; a failed claim carries a machine-readable 'failure_reason' and a completed one carries 'domain_id', the new domain it created.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" },
+        claimId: { type: "string" }
+      },
+      required: ["publicationId", "claimId"]
+    }
+  },
+  {
+    name: "domain.claim_verify",
+    description:
+      "Check the claim's TXT record and complete the claim if it is there. Safe to call repeatedly: a record that has not propagated yet returns code 'claim_txt_not_found' and leaves the claim pending with the SAME record, so nothing has to be republished. On success the previous holder's domain is released — they are emailed that the host went and how to claim it back — and a new sending domain is created for this publication, returned in full as 'domain' so its DNS records can be published without a second call.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" },
+        claimId: { type: "string" }
+      },
+      required: ["publicationId", "claimId"]
+    }
+  },
+  {
+    name: "domain.claim_cancel",
+    description:
+      "Withdraw a pending domain claim. Only a pending claim can be cancelled; a completed or failed one returns code 'claim_not_pending'.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        publicationId: { type: "string" },
+        claimId: { type: "string" }
+      },
+      required: ["publicationId", "claimId"]
     }
   },
   // --- Tracking sub-domains (CNAME, under a domain) -------------------------
@@ -4090,7 +4195,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
   },
   {
     name: "site.page_upsert",
-    description: `Create or replace a WHOLE page document. A site's pages are a FIXED SET — home, archive, post, and the unsubscribe pair; free landing pages are not available yet, so there is no "custom" kind to create one with. (/subscribe is served from a built-in document and needs no page.) Prefer site.apply_ops for edits — this write goes through a total parser that silently REPAIRS what it cannot accept (clamping values, dropping unknown properties and overflow past the 40-section / 50-child / 200-node caps), so a success response does NOT mean the document was stored as sent. Read the page back with site.page_get and diff it. Note this writes the LIVE row for content ('draft' status keeps a page off the public site), not the draft column. ${SITE_DOC_HELP}`,
+    description: `Create or replace a WHOLE page document. Reserved kinds are home, archive, post, subscribe and the unsubscribe pair; anything else is kind "custom" — an ordinary page at a slug of your choosing. (/subscribe is served from a built-in document and needs no page.) A custom page is created as a DRAFT unless you pass status "published", because building is unlimited on every plan while PUBLISHING is capped by plan (free 1, hobby 5, pro 25) — an over-cap publish is refused with a message naming the limit. A custom page also may not take a reserved slug: the public route resolves by slug alone, so "archive" would collide with the real archive. Prefer site.apply_ops for edits — this write goes through a total parser that silently REPAIRS what it cannot accept (clamping values, dropping unknown properties and overflow past the 40-section / 50-child / 200-node caps), so a success response does NOT mean the document was stored as sent. Read the page back with site.page_get and diff it. Note this writes the LIVE row for content ('draft' status keeps a page off the public site), not the draft column. ${SITE_DOC_HELP}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -4098,11 +4203,24 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
         id: { type: "string", description: "Existing page id. Omit to create a new page." },
         kind: {
           type: "string",
-          enum: ["home", "archive", "post", "subscribe", "unsubscribe", "unsubscribe_success"]
+          enum: [
+            "home",
+            "archive",
+            "post",
+            "subscribe",
+            "unsubscribe",
+            "unsubscribe_success",
+            "custom"
+          ]
         },
         slug: { type: "string" },
         title: { type: "string" },
-        status: { type: "string", enum: ["draft", "published", "disabled"] },
+        status: {
+          type: "string",
+          enum: ["draft", "published", "disabled"],
+          description:
+            "Omit on a NEW custom page to create a draft; omit on an existing page to keep the status it has."
+        },
         contentJson: {
           type: "object",
           description:
@@ -4221,7 +4339,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
   {
     name: "site.publish",
     description:
-      "Publish the site: promote every pending draft page and the draft design to live, for real visitors. Call this ONLY when the user has explicitly asked to publish — design work belongs on the draft, which the operator previews and approves first.",
+      "Publish the site: promote every pending draft page and the draft design to live, for real visitors. Call this ONLY when the user has explicitly asked to publish — design work belongs on the draft, which the operator previews and approves first. Refused if publishing would put more CUSTOM pages live than the plan allows (free 1, hobby 5, pro 25): the whole publish is refused rather than a subset going live, and the message names the limit. Unpublish or delete a custom page and call again.",
     inputSchema: {
       type: "object",
       properties: {
@@ -7084,6 +7202,9 @@ async function runTool(
     const name = readRequiredString(args, "name");
     const purpose = asOptionalString(args.purpose);
     const isPrimary = readOptionalBoolean(args, "is_primary");
+    const region = asOptionalString(args.region);
+    const tls = asOptionalString(args.tls);
+    const trackingSubdomain = asOptionalString(args.tracking_subdomain);
     const result = await callRestApi<{ id: string; name: string; status: string; records: unknown[] }>(
       "POST",
       "/v1/domains",
@@ -7091,7 +7212,14 @@ async function runTool(
         publication_id: publicationId,
         name,
         ...(purpose ? { purpose } : {}),
-        ...(isPrimary !== undefined ? { is_primary: isPrimary } : {})
+        ...(isPrimary !== undefined ? { is_primary: isPrimary } : {}),
+        // Only sent when named: the API's own defaults (the deployment region,
+        // opportunistic TLS, no tracking subdomain) are the right answer, and
+        // sending them explicitly would freeze today's defaults into every
+        // agent-created domain.
+        ...(region ? { region } : {}),
+        ...(tls ? { tls } : {}),
+        ...(trackingSubdomain ? { tracking_subdomain: trackingSubdomain } : {})
       },
       options
     );
@@ -7106,6 +7234,10 @@ async function runTool(
     const limit = readOptionalNumber(args, "limit");
     const params = new URLSearchParams({ publication_id: publicationId });
     if (limit !== undefined) params.set("limit", String(limit));
+    const region = asOptionalString(args.region);
+    if (region) params.set("region", region);
+    const status = asOptionalString(args.status);
+    if (status) params.set("status", status);
     const result = await callRestApi<{ data: unknown[] }>(
       "GET",
       `/v1/domains?${params.toString()}`,
@@ -7146,6 +7278,8 @@ async function runTool(
     const isPrimary = readOptionalBoolean(args, "is_primary");
     const openTracking = readOptionalBoolean(args, "open_tracking");
     const clickTracking = readOptionalBoolean(args, "click_tracking");
+    const tls = asOptionalString(args.tls);
+    const trackingSubdomain = asOptionalString(args.tracking_subdomain);
     // Accepts a boolean OR the subdomain by name, so an agent can either take
     // the conventional `bounce.<domain>` or place it deliberately.
     const rawReturnPath = args.custom_return_path;
@@ -7163,7 +7297,13 @@ async function runTool(
       click_tracking?: boolean;
       custom_return_path?: string | null;
       custom_return_path_status?: string | null;
-      records?: Array<{ record: string; name: string; value: string; purpose?: string }>;
+      records?: Array<{
+        record: string;
+        type: string;
+        name: string;
+        value: string;
+        purpose?: string;
+      }>;
     }>(
       "PATCH",
       `/v1/domains/${encodeURIComponent(domainId)}?publication_id=${encodeURIComponent(publicationId)}`,
@@ -7174,7 +7314,9 @@ async function runTool(
         // re-enables tracking someone switched off.
         ...(openTracking !== undefined ? { open_tracking: openTracking } : {}),
         ...(clickTracking !== undefined ? { click_tracking: clickTracking } : {}),
-        ...(customReturnPath !== undefined ? { custom_return_path: customReturnPath } : {})
+        ...(customReturnPath !== undefined ? { custom_return_path: customReturnPath } : {}),
+        ...(tls ? { tls } : {}),
+        ...(trackingSubdomain ? { tracking_subdomain: trackingSubdomain } : {})
       },
       options
     );
@@ -7194,7 +7336,10 @@ async function runTool(
             result.records ?? []
           )
             .filter((record) => record.purpose === "return-path")
-            .map((record) => `${record.record} ${record.name} -> ${record.value}`)
+            // `type`, never `record`: since the record reshape `record` holds
+            // the ROLE ("Return-Path", "SPF"), and printing it here told an
+            // operator to create a DNS record of type "Return-Path".
+            .map((record) => `${record.type} ${record.name} -> ${record.value}`)
             .join("; ")}. Mail keeps sending on the default return-path until they resolve`
         : customReturnPath !== undefined
           ? ". Return-path reverted to the default"
@@ -7215,6 +7360,102 @@ async function runTool(
       options
     );
     return makeToolResult(`Domain ${result.id} deleted.`, result);
+  }
+
+  // --- Domain claiming ------------------------------------------------------
+  if (toolName === "domain.claim") {
+    const publicationId = readRequiredString(args, "publicationId");
+    const name = readRequiredString(args, "name");
+    const region = asOptionalString(args.region);
+    const result = await callRestApi<{
+      id: string;
+      name: string;
+      status: string;
+      expires_at: string | null;
+      records?: Array<{ type: string; name: string; value: string }>;
+    }>(
+      "POST",
+      "/v1/domains/claim",
+      { publication_id: publicationId, name, ...(region ? { region } : {}) },
+      options
+    );
+    // The record is stated inline, not left for a follow-up call: it is the one
+    // thing the operator has to act on, and an agent that only reports "claim
+    // opened" has told them nothing they can do.
+    // Optional-chained on purpose: this is a network boundary, and a claim that
+    // came back without its record must still report the claim id rather than
+    // dying on a TypeError the caller cannot read.
+    const record = result.records?.[0];
+    return makeToolResult(
+      `Claim ${result.id} opened for ${result.name} (${result.status}). Publish this DNS record to prove control: ${
+        record ? `${record.type} ${record.name} -> ${record.value}` : "(none returned)"
+      }. Then call domain.claim_verify.${
+        result.expires_at ? ` The claim expires at ${result.expires_at}.` : ""
+      }`,
+      result
+    );
+  }
+
+  if (toolName === "domain.claim_get") {
+    const publicationId = readRequiredString(args, "publicationId");
+    const claimId = readRequiredString(args, "claimId");
+    const result = await callRestApi<{
+      id: string;
+      name: string;
+      status: string;
+      failure_reason: string | null;
+      domain_id: string | null;
+    }>(
+      "GET",
+      `/v1/domains/claims/${encodeURIComponent(claimId)}?publication_id=${encodeURIComponent(publicationId)}`,
+      undefined,
+      options
+    );
+    return makeToolResult(
+      `Claim ${result.id} for ${result.name} is ${result.status}${
+        result.failure_reason ? ` (${result.failure_reason})` : ""
+      }${result.domain_id ? `. New domain: ${result.domain_id}` : ""}.`,
+      result
+    );
+  }
+
+  if (toolName === "domain.claim_verify") {
+    const publicationId = readRequiredString(args, "publicationId");
+    const claimId = readRequiredString(args, "claimId");
+    const result = await callRestApi<{
+      id: string;
+      name: string;
+      status: string;
+      domain_id: string | null;
+      // The claimed domain in full, so the DNS it needs is one call away rather
+      // than two. Nullable: it only exists once the claim completed.
+      domain?: { id: string; records?: unknown[] } | null;
+    }>(
+      "POST",
+      `/v1/domains/claims/${encodeURIComponent(claimId)}/verify?publication_id=${encodeURIComponent(publicationId)}`,
+      undefined,
+      options
+    );
+    return makeToolResult(
+      result.status === "completed"
+        ? `Claim ${result.id} completed. ${result.name} is now yours as domain ${
+            result.domain_id ?? "(pending lookup)"
+          }. Publish its DNS records (in 'domain.records') before sending from it.`
+        : `Claim ${result.id} for ${result.name} is still ${result.status}.`,
+      result
+    );
+  }
+
+  if (toolName === "domain.claim_cancel") {
+    const publicationId = readRequiredString(args, "publicationId");
+    const claimId = readRequiredString(args, "claimId");
+    const result = await callRestApi<{ id: string }>(
+      "DELETE",
+      `/v1/domains/claims/${encodeURIComponent(claimId)}?publication_id=${encodeURIComponent(publicationId)}`,
+      undefined,
+      options
+    );
+    return makeToolResult(`Claim ${result.id} withdrawn.`, result);
   }
 
   // --- Tracking sub-domains -------------------------------------------------
