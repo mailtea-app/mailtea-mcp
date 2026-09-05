@@ -3208,7 +3208,7 @@ export const MCP_TOOLS = [
   {
     name: "domain.verify",
     description:
-      "Check a domain's DNS and report its verification state. Sending is gated on two parts: the ownership TXT record must verify (which sets status to 'verified') AND the branded DKIM TXT record must verify. Ownership verification alone does NOT make a domain sendable. The response now includes 'dkim_status' and 'receiving_mx_found' so you can confirm both before sending.",
+      "Check a domain's DNS and report its verification state. Sending is gated on two parts: the ownership TXT record must verify (which sets status to 'verified') AND the branded DKIM TXT record must verify. Ownership verification alone does NOT make a domain sendable. The response now includes 'dkim_status' and 'receiving_mx_found' so you can confirm both before sending. Verify is also what settles the MX row in 'records': the answer is stored, so every later read of the domain reports what this verify found rather than 'pending'.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3221,7 +3221,7 @@ export const MCP_TOOLS = [
   {
     name: "domain.update",
     description:
-      "Update a domain's purpose (email/site/both), primary flag, tracking policy, TLS policy, tracking subdomain, or custom return-path. A domain's REGION cannot be changed — delete it and add it again in the new region. Turning open_tracking or click_tracking off stops Mailtea measuring opens or clicks for EVERY message from this domain — a single send cannot re-enable it. Setting custom_return_path delegates a subdomain as the envelope sender so SPF aligns with this domain; it requires two DNS records and reports back in the domain's records list.",
+      "Update a domain's purpose (email/site/both), primary flag, tracking policy, TLS policy, tracking subdomain, or custom return-path. A domain's REGION cannot be changed — delete it and add it again in the new region. Turning open_tracking or click_tracking off stops Mailtea measuring opens or clicks for EVERY message from this domain — a single send cannot re-enable it. Setting custom_return_path delegates a subdomain as the envelope sender so SPF aligns with this domain; it requires two DNS records and reports back in the domain's records list. Pass tracking_subdomain: null to REMOVE a tracking subdomain — this is not reversible for links already sent.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3251,9 +3251,9 @@ export const MCP_TOOLS = [
             "'enforced' means a recipient server that will not negotiate TLS gets a bounce instead of a plaintext delivery. Refused with code 'tls_not_available' when this domain's region cannot enforce it."
         },
         tracking_subdomain: {
-          type: "string",
           description:
-            "Serve tracked links from your own domain, e.g. 'links' gives links.acme.com. Replaces any subdomain already chosen; links already sent on the old host keep working only while its DNS stays. A reserved label, or the one the return-path uses, is refused with code 'tracking_subdomain_invalid'."
+            "Serve tracked links from your own domain, e.g. 'links' gives links.acme.com. Replaces any subdomain already chosen; links already sent on the old host keep working only while its DNS stays. Pass null to remove it: the domain's links go back to being served from the Mailtea host, and links in mail already sent point at the old hostname and stop resolving — there is no way to reinstate them. An empty string is not a second spelling of null; it is refused with code 'tracking_subdomain_invalid', as is a reserved label or the one the return-path uses.",
+          anyOf: [{ type: "string" }, { type: "null" }]
         }
       },
       required: ["publicationId", "domainId"]
@@ -7279,7 +7279,20 @@ async function runTool(
     const openTracking = readOptionalBoolean(args, "open_tracking");
     const clickTracking = readOptionalBoolean(args, "click_tracking");
     const tls = asOptionalString(args.tls);
-    const trackingSubdomain = asOptionalString(args.tracking_subdomain);
+    // Three states, not two: absent leaves the subdomain alone, `null` removes
+    // it, a value sets it. `asOptionalString` collapsed the first two, which is
+    // why an agent could not clear one at all.
+    //
+    // It is deliberately not used for the value either. It maps `""` to
+    // `undefined`, so an empty subdomain dropped the key and the agent got a
+    // 200 that changed nothing — while this tool's own schema says `""` is
+    // refused with `tracking_subdomain_invalid`. Only `undefined` omits here;
+    // everything else goes to the wire and the API is the judge, which is how
+    // every other client behaves. A wrong TYPE has to reach the API too:
+    // mapping it to `null` the way `custom_return_path` does would turn a stray
+    // number into the silent removal of a live tracking host.
+    const trackingSubdomain =
+      args.tracking_subdomain === undefined ? undefined : args.tracking_subdomain;
     // Accepts a boolean OR the subdomain by name, so an agent can either take
     // the conventional `bounce.<domain>` or place it deliberately.
     const rawReturnPath = args.custom_return_path;
@@ -7316,7 +7329,9 @@ async function runTool(
         ...(clickTracking !== undefined ? { click_tracking: clickTracking } : {}),
         ...(customReturnPath !== undefined ? { custom_return_path: customReturnPath } : {}),
         ...(tls ? { tls } : {}),
-        ...(trackingSubdomain ? { tracking_subdomain: trackingSubdomain } : {})
+        // `!== undefined`, not truthiness: `null` is the removal, and a falsy
+        // check would silently turn it into leaving the subdomain in place.
+        ...(trackingSubdomain !== undefined ? { tracking_subdomain: trackingSubdomain } : {})
       },
       options
     );

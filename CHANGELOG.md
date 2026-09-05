@@ -2,6 +2,18 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
+## Unreleased
+
+- Added: `domain.update` takes `tracking_subdomain: null` to remove a tracking
+  subdomain. The domain's links go back to being served from the Mailtea host.
+  Links in mail you have already sent point at the old hostname and stop
+  resolving — there is no way to reinstate them. An empty string is not the same
+  thing: it is refused with `tracking_subdomain_invalid`. `domain.create`'s
+  schema is unchanged — a create has nothing to clear.
+- Changed: the `MX` row in `records` now reports what the last verify found,
+  instead of reading `pending` on every request but the verify itself. A domain
+  nobody has verified reads `not_started`.
+
 ## 0.12.0 (2026-09-03)
 
 - Added: `domain.claim`, `domain.claim_get`, `domain.claim_verify` and
