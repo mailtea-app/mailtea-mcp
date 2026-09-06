@@ -4,6 +4,34 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
 
+- Changed: `automation.enable`'s description now names the second way an
+  activation is refused. When a `send_email` step cannot resolve a sender the
+  server answers `no_verified_sender` with a `reason` — `NO_SENDER`,
+  `DOMAIN_NOT_VERIFIED`, `WRONG_PURPOSE`, `DKIM_NOT_VERIFIED` or `INVALID_FROM`
+  — and `steps[]` naming every blocking step. The tool only advertised
+  `automation_invalid` and its `issues[]`, so an agent hitting a publication
+  with no verified sender had nothing in the schema to explain the refusal and
+  no way to know that adding a sender, or verifying its domain, is the fix.
+- Added: `contact.import_csv` takes `enrollInAutomations`, which enrolls the
+  imported contacts in matching `contact.created` / `contact.subscribed`
+  automations — so an agent can start an imported list on a welcome series.
+  Previously impossible: the tool neither advertised nor forwarded the flag, so
+  the answer was always no and the import had to be redone by hand in Studio. It
+  defaults to **false**, the same default as Studio's import checkbox, because
+  importing a list is bringing existing subscribers in, not watching them sign
+  up. The argument is camelCase, matching this tool's other arguments and the
+  procedure behind it. The result now also carries `enrolledAutomations`, the
+  number of enrollments the import created.
+- Added: `contact.import_csv` takes `confirmLargeEnrollment`. Above **500 rows**,
+  an import with `enrollInAutomations` true is refused with
+  `enrollment_too_large` and nothing is stored unless this is also true. It is a
+  confirmation, not a cap: an acknowledged import of any size goes through, which
+  is the same deal a Studio operator gets from the confirm screen. Defaults to
+  **false**, and an explicit `false` acknowledges nothing. The refusal message
+  names the field and the row count, and it arrives in `error.message` — the only
+  part of a tRPC error an agent can read — so a tool that hits it can correct
+  itself in one step. A plain import is never limited by size, because it
+  enrolls nobody.
 - Added: `domain.update` takes `tracking_subdomain: null` to remove a tracking
   subdomain. The domain's links go back to being served from the Mailtea host.
   Links in mail you have already sent point at the old hostname and stop
@@ -13,6 +41,14 @@ All notable changes to `mailtea-mcp` are documented here.
 - Changed: the `MX` row in `records` now reports what the last verify found,
   instead of reading `pending` on every request but the verify itself. A domain
   nobody has verified reads `not_started`.
+- Fixed: `domain.create` sends `tracking_subdomain` as you gave it, so an empty
+  string is refused with `tracking_subdomain_invalid` — as the tool's own schema
+  says it is — instead of being dropped. It used to be read through a helper
+  that treats `""` as "not named", so the create went through as though you had
+  never asked for a tracking subdomain: a 200, a domain with no tracking host,
+  and nothing to say why. A wrong type reaches the API too and earns a 400
+  rather than being ignored. Only leaving the field out omits it now, which is
+  the same rule `domain.update` follows.
 
 ## 0.12.0 (2026-09-03)
 

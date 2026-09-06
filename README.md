@@ -25,7 +25,7 @@ The server defaults to the Mailtea cloud API. Self-hosting or running locally? A
 - `template.*` — reusable email templates: `create`, `list`, `get`, `update`, `publish`, `duplicate`, `delete`, plus `versions` / `restore_version` (a restore is a content write, so it returns the template to draft)
 - `publication.*`
 - `domain.*` — sending domains: add, read DNS records, verify, then send from it; `claim` / `claim_get` / `claim_verify` / `claim_cancel` take over a domain another publication holds by proving DNS control
-- `contact.*` — incl. `get`, `delete`, `get_properties`, `set_properties`
+- `contact.*` — incl. `get`, `delete`, `get_properties`, `set_properties`. `import_csv` takes `enrollInAutomations` to put the imported contacts through matching `contact.created` / `contact.subscribed` automations — how an imported list starts a welcome series. It defaults to **false**, the same default as Studio's import checkbox. Above 500 rows it also needs `confirmLargeEnrollment: true` — the same acknowledgement a Studio operator gives on the confirm screen — or the import is refused with `enrollment_too_large` and stores nothing
 - `contact_property.*` — custom contact fields
 - `segment.*` — saved, filter-based audience segments
 - `tag.*` — tag definitions

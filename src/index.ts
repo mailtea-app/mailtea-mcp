@@ -166,6 +166,8 @@ type ContactImportCsvResult = {
   blankCount: number;
   duplicateCount: number;
   invalidSamples: string[];
+  /** Enrollments the import created. 0 unless `enrollInAutomations` was true. */
+  enrolledAutomations?: number;
 };
 
 type ReferralMilestoneRecord = {
@@ -2045,12 +2047,27 @@ export const MCP_TOOLS = [
   },
   {
     name: "contact.import_csv",
-    description: "Import contacts from CSV text payload",
+    description:
+      "Import contacts from CSV text payload. Returns per-outcome counts plus enrolledAutomations, the number of automation enrollments the import created — always 0 unless enrollInAutomations is true.",
     inputSchema: {
       type: "object",
       properties: {
         publicationId: { type: "string" },
-        csvText: { type: "string" }
+        csvText: { type: "string" },
+        enrollInAutomations: {
+          type: "boolean",
+          description:
+            // The 500 and the code are LITERALS, not imports: `@mailtea/contracts`
+            // is a devDependency here, so nothing from it may reach the published
+            // bundle. `import-enrollment-parity.test.ts` fails if either drifts
+            // from the server's value.
+            "Enroll the imported contacts in matching contact.created / contact.subscribed automations, so an imported list can start a welcome series. DEFAULTS TO FALSE, the same default as the Studio import checkbox: importing a list is bringing existing subscribers in, not watching them sign up, so a publication with an active welcome automation would otherwise email every imported row. Opting in has to be a decision someone made. Above 500 rows this additionally needs confirmLargeEnrollment — see that field."
+        },
+        confirmLargeEnrollment: {
+          type: "boolean",
+          description:
+            "Acknowledges the blast radius of a LARGE enrolling import. Above 500 rows, an import with enrollInAutomations true is refused with `enrollment_too_large` and NOTHING is stored unless this is also true; the refusal message names this field and says how many contacts are involved, so send the same request again with it set once you have decided to go ahead. DEFAULTS TO FALSE. This is the same acknowledgement a Studio operator gives on the confirm screen, not a way around the check — everyone in the file will receive the automation's emails and they cannot be recalled. Ignored without enrollInAutomations, since a plain import enrolls nobody and is never limited by size."
+        }
       },
       required: ["publicationId", "csvText"]
     }
@@ -3165,7 +3182,7 @@ export const MCP_TOOLS = [
         tracking_subdomain: {
           type: "string",
           description:
-            "Serve open-pixel and click-tracking links from your own domain, e.g. 'links' gives links.acme.com. Adds a Tracking CNAME to 'records'; links stay on the platform host until it verifies. Letters, digits and hyphens only; a reserved label, or the one the return-path uses, is refused with code 'tracking_subdomain_invalid'."
+            "Serve open-pixel and click-tracking links from your own domain, e.g. 'links' gives links.acme.com. Adds a Tracking CNAME to 'records'; links stay on the platform host until it verifies. Letters, digits and hyphens only; a reserved label, or the one the return-path uses, is refused with code 'tracking_subdomain_invalid'. Unlike domain.update, null is NOT accepted here — a create has nothing to clear, and it is refused as a validation error. Leave the field out to create the domain without a tracking subdomain."
         }
       },
       required: ["publicationId", "name"]
@@ -3886,7 +3903,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "automation.enable",
-    description: `Activate an automation so it starts enrolling contacts. Refused with coded issues[] when the graph has errors. There is deliberately no automation.test tool — a test run sends real, billed email, so it is not exposed to agents. ${AUTOMATION_SNAKE_CASE_HELP}`,
+    description: `Activate an automation so it starts enrolling contacts. Refused with coded issues[] when the graph has errors. Also refused with code no_verified_sender when a send_email step has no sender it can send from: reason is NO_SENDER (no step sender, no publication default, no template from_address), DOMAIN_NOT_VERIFIED, WRONG_PURPOSE, DKIM_NOT_VERIFIED or INVALID_FROM, and steps[] names every blocking step key — add a sender or verify its sending domain, then enable again. There is deliberately no automation.test tool — a test run sends real, billed email, so it is not exposed to agents. ${AUTOMATION_SNAKE_CASE_HELP}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -5766,18 +5783,25 @@ async function runTool(
   if (toolName === "contact.import_csv") {
     const publicationId = readRequiredString(args, "publicationId");
     const csvText = readRequiredString(args, "csvText");
+    // Both omitted rather than sent as false: the procedure defaults both to
+    // false, and an absent key keeps the payload identical to what every
+    // existing caller sends.
+    const enrollInAutomations = readOptionalBoolean(args, "enrollInAutomations");
+    const confirmLargeEnrollment = readOptionalBoolean(args, "confirmLargeEnrollment");
 
     const result = await callTrpc<ContactImportCsvResult>(
       "contact.importCsv",
       {
         publicationId,
-        csvText
+        csvText,
+        ...(enrollInAutomations === undefined ? {} : { enrollInAutomations }),
+        ...(confirmLargeEnrollment === undefined ? {} : { confirmLargeEnrollment })
       },
       options
     );
 
     return makeToolResult(
-      `Contact import complete for ${publicationId}: +${result.createdCount} new, ${result.reactivatedCount} reactivated, ${result.invalidCount} invalid`,
+      `Contact import complete for ${publicationId}: +${result.createdCount} new, ${result.reactivatedCount} reactivated, ${result.invalidCount} invalid, ${result.enrolledAutomations ?? 0} enrolled in automations`,
       result
     );
   }
@@ -7204,7 +7228,14 @@ async function runTool(
     const isPrimary = readOptionalBoolean(args, "is_primary");
     const region = asOptionalString(args.region);
     const tls = asOptionalString(args.tls);
-    const trackingSubdomain = asOptionalString(args.tracking_subdomain);
+    // Read raw for the same reason `domain.update` does: `asOptionalString`
+    // maps `""` to `undefined`, so an empty subdomain dropped the key and the
+    // agent got a created domain with no tracking host and no error — while
+    // this tool's own schema says `""` is refused with
+    // `tracking_subdomain_invalid`. Only `undefined` omits; everything else,
+    // including a wrong type, goes to the wire and the API is the judge.
+    const trackingSubdomain =
+      args.tracking_subdomain === undefined ? undefined : args.tracking_subdomain;
     const result = await callRestApi<{ id: string; name: string; status: string; records: unknown[] }>(
       "POST",
       "/v1/domains",
@@ -7219,7 +7250,7 @@ async function runTool(
         // agent-created domain.
         ...(region ? { region } : {}),
         ...(tls ? { tls } : {}),
-        ...(trackingSubdomain ? { tracking_subdomain: trackingSubdomain } : {})
+        ...(trackingSubdomain !== undefined ? { tracking_subdomain: trackingSubdomain } : {})
       },
       options
     );
