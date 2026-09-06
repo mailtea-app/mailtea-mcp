@@ -9198,10 +9198,15 @@ export async function handleMcpRequest(
         return response(id, result);
       }
 
-      case "notifications/initialized":
-        return response(id, {});
-
       default:
+        // Every `notifications/*` method is one-way: the client is telling us
+        // something, not asking. "Method not found" for one we don't act on —
+        // `notifications/cancelled`, say — turns a routine message into an
+        // error a strict client treats as a failed session, so they all no-op.
+        if (request.method.startsWith("notifications/")) {
+          return response(id, {});
+        }
+
         return error(id, -32601, "Method not found", { method: request.method });
     }
   } catch (err) {

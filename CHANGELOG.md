@@ -4,6 +4,15 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
 
+- Fixed: over stdio, a message with no `id` is no longer executed. JSON-RPC
+  calls such a message a notification; the hosted HTTP endpoint answers one
+  with `202` and dispatches nothing, while stdio ran the call and merely
+  withheld the reply — so a `tools/call` that omitted its `id` performed a real
+  write on one transport and nothing on the other.
+- Fixed: a `notifications/*` method the server does not act on —
+  `notifications/cancelled`, say — is accepted as the one-way message it is
+  instead of answered with `-32601 Method not found`, which a strict client
+  reads as a failed session.
 - Changed: `automation.enable`'s description now names the second way an
   activation is refused. When a `send_email` step cannot resolve a sender the
   server answers `no_verified_sender` with a `reason` — `NO_SENDER`,
