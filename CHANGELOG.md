@@ -4,6 +4,9 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
 
+- Changed: `domain.verify` (and every domain read) now reports
+  `receiving_identity_status`, so an agent can tell whether a domain is
+  registered to receive mail before advising an `MX` change.
 - Fixed: over stdio, a message with no `id` is no longer executed. JSON-RPC
   calls such a message a notification; the hosted HTTP endpoint answers one
   with `202` and dispatches nothing, while stdio ran the call and merely

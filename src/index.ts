@@ -3225,7 +3225,7 @@ export const MCP_TOOLS = [
   {
     name: "domain.verify",
     description:
-      "Check a domain's DNS and report its verification state. Sending is gated on two parts: the ownership TXT record must verify (which sets status to 'verified') AND the branded DKIM TXT record must verify. Ownership verification alone does NOT make a domain sendable. The response now includes 'dkim_status' and 'receiving_mx_found' so you can confirm both before sending. Verify is also what settles the MX row in 'records': the answer is stored, so every later read of the domain reports what this verify found rather than 'pending'.",
+      "Check a domain's DNS and report its verification state. Sending is gated on two parts: the ownership TXT record must verify (which sets status to 'verified') AND the branded DKIM TXT record must verify. Ownership verification alone does NOT make a domain sendable. The response now includes 'dkim_status' and 'receiving_mx_found' so you can confirm both before sending. Verify is also what settles the MX row in 'records': the answer is stored, so every later read of the domain reports what this verify found rather than 'pending'. The response also carries 'receiving_identity_status' (pending, verified, failed, or null when not started): whether the domain is registered to RECEIVE mail at Mailtea's inbound endpoint. Tell the user to point their MX at Mailtea only once it reads 'verified'.",
     inputSchema: {
       type: "object",
       properties: {
