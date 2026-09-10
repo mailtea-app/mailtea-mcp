@@ -2,7 +2,7 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
-## Unreleased
+## 0.13.0 (2026-09-10)
 
 - Changed: `domain.verify` (and every domain read) now reports
   `receiving_identity_status`, so an agent can tell whether a domain is
