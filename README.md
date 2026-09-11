@@ -16,10 +16,14 @@ Create the token (prefix `mt_pat_`) in **Settings → API keys**, then ask your 
 
 The server defaults to the Mailtea cloud API. Self-hosting or running locally? Add `-e MAILTEA_API_BASE_URL=http://localhost:7787` (and optional `-e MAILTEA_PUBLICATION_ID=pub_demo`).
 
+### Which publication a tool acts on
+
+`publicationId` (spelled `publication_id` on the automation and event tools) is **optional** everywhere. Left out, it resolves to the publication the connection is already for: the one chosen on the consent screen after a browser sign-in, the one a publication-scoped API key was minted for, or `MAILTEA_PUBLICATION_ID` over stdio. Pass it explicitly when your credential reaches more than one publication. An explicit id is never widened — a credential scoped to one publication is still refused for any other.
+
 ## Tool families
 
 - `email.*` — `email.send`, `email.batch`, `email.get`, `email.list`, `email.analytics`, `email.reschedule`, `email.cancel`, `email.resend` (transactional, one-shot to specific recipients; `resend` retries a failed/bounced email)
-- `email.inbound_*` — received email: `inbound_list`, `inbound_get`, `inbound_list_attachments`, `inbound_get_attachment`, `inbound_reply` (auto-threaded; only `inbound_list` needs publicationId)
+- `email.inbound_*` — received email: `inbound_list`, `inbound_get`, `inbound_list_attachments`, `inbound_get_attachment`, `inbound_reply` (auto-threaded; all but `inbound_list` resolve the publication from the email id, so they take no `publicationId` at all)
 - `auth.*`
 - `issue.*` — newsletter drafts + sends to the whole list, plus `publish_to_web` / `unpublish_from_web`
 - `template.*` — reusable email templates: `create`, `list`, `get`, `update`, `publish`, `duplicate`, `delete`, plus `versions` / `restore_version` (a restore is a content write, so it returns the template to draft)

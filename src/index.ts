@@ -35,7 +35,27 @@ export type JsonRpcResponse = {
 export type McpRuntimeOptions = {
   apiBaseUrl?: string;
   token?: string | null;
+  /**
+   * The publication this connection is for — the OAuth grant's publication over
+   * the hosted endpoint, or the one a publication-scoped key was minted for.
+   * Tools that take a `publicationId` fall back to it when the caller omits one.
+   */
   publicationId?: string | null;
+  /**
+   * May `MAILTEA_PUBLICATION_ID` in this process supply that default?
+   *
+   * TRUE for stdio and the CLI, where the process belongs to one person and the
+   * variable is how they say which publication they mean. FALSE for the hosted
+   * server, where ONE process answers for every tenant: a variable set there
+   * (copied from a smoke-test env, say) would silently become the default
+   * publication for callers who have nothing to do with it, and a team-scoped
+   * key — which passes the publication check precisely because it is scoped to
+   * none — would read it without being refused. Such a caller must keep naming
+   * the publication it means.
+   *
+   * Defaults to true, so every existing embedder keeps the behaviour it has.
+   */
+  envPublicationFallback?: boolean;
   fetchImpl?: typeof fetch;
 };
 
@@ -1639,7 +1659,29 @@ const SITE_OP_SCHEMA = {
  * client that asked was told the wrong number; `version.test.ts` now ties the
  * two together.
  */
-export const SERVER_VERSION = "0.13.0";
+export const SERVER_VERSION = "0.14.0";
+
+/**
+ * The publication a tool acts on — advertised as OPTIONAL on every tool that
+ * takes one.
+ *
+ * A credential almost always already names the publication. The hosted OAuth
+ * grant names exactly one (the operator picked it on the consent screen, and
+ * `assertPublicationAccess` refuses every other one for the life of the token);
+ * a publication-scoped key is the same; stdio has `MAILTEA_PUBLICATION_ID`.
+ * Demanding the id again bought no authority — the only value the server would
+ * accept is the one it already holds — while `required` made agents fail the
+ * call outright rather than omit it, because a tool schema is the only thing an
+ * agent can read.
+ *
+ * Shared object, referenced by every tool rather than copied, so the sentence
+ * an agent reads cannot drift between two tools that mean the same thing.
+ */
+const PUBLICATION_ID_SCHEMA = {
+  type: "string",
+  description:
+    "Publication to act on. Optional: defaults to the publication this connection is authorized for (the OAuth grant's publication, a publication-scoped API key, or MAILTEA_PUBLICATION_ID). Pass it only when the credential reaches more than one publication, or to be explicit."
+} as const;
 
 export const MCP_TOOLS = [
   {
@@ -1656,7 +1698,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         title: { type: "string" },
         kind: { type: "string", enum: ["newsletter", "broadcast"], description: "Email kind. 'newsletter' (default) can publish to the public site; 'broadcast' is one-time email-only." },
         templateId: { type: "string", description: "Seed the draft from a published server template (see template.list). Takes precedence over contentHtml/contentSpec." },
@@ -1672,7 +1714,7 @@ export const MCP_TOOLS = [
           required: ["root", "elements"]
         }
       },
-      required: ["publicationId", "title"]
+      required: ["title"]
     }
   },
   {
@@ -1766,10 +1808,9 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         limit: { type: "number" }
-      },
-      required: ["publicationId"]
+      }
     }
   },
   {
@@ -1786,7 +1827,15 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        // NOT the connected publication: the id to give the publication being
+        // created. Spelled out because every other tool's `publicationId` now
+        // defaults, and an agent that carried that habit here would try to
+        // create a publication on top of the one it is connected to.
+        publicationId: {
+          type: "string",
+          description:
+            "Optional id to assign the NEW publication (prefix pub_). This is not the publication to act on — publication.create always creates one."
+        },
         name: { type: "string" },
         timezone: { type: "string" }
       },
@@ -1799,10 +1848,9 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         limit: { type: "number" }
-      },
-      required: ["publicationId"]
+      }
     }
   },
   {
@@ -1811,12 +1859,12 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         host: { type: "string" },
         isPrimary: { type: "boolean" },
         proxyTarget: { type: "string" }
       },
-      required: ["publicationId", "host"]
+      required: ["host"]
     }
   },
   {
@@ -1825,11 +1873,11 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         domainId: { type: "string" },
         verificationValue: { type: "string" }
       },
-      required: ["publicationId", "domainId"]
+      required: ["domainId"]
     }
   },
   {
@@ -1838,10 +1886,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         domainId: { type: "string" }
       },
-      required: ["publicationId", "domainId"]
+      required: ["domainId"]
     }
   },
   {
@@ -1850,10 +1898,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         domainId: { type: "string" }
       },
-      required: ["publicationId", "domainId"]
+      required: ["domainId"]
     }
   },
   {
@@ -1862,9 +1910,8 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" }
-      },
-      required: ["publicationId"]
+        publicationId: PUBLICATION_ID_SCHEMA
+      }
     }
   },
   {
@@ -1873,10 +1920,9 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         limit: { type: "number" }
-      },
-      required: ["publicationId"]
+      }
     }
   },
   {
@@ -1886,13 +1932,13 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         name: { type: "string" },
         email: { type: "string" },
         replyTo: { type: "string" },
         isDefault: { type: "boolean" }
       },
-      required: ["publicationId", "name", "email"]
+      required: ["name", "email"]
     }
   },
   {
@@ -1901,13 +1947,13 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         senderId: { type: "string" },
         name: { type: "string" },
         replyTo: { type: "string" },
         isDefault: { type: "boolean" }
       },
-      required: ["publicationId", "senderId"]
+      required: ["senderId"]
     }
   },
   {
@@ -1916,10 +1962,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         senderId: { type: "string" }
       },
-      required: ["publicationId", "senderId"]
+      required: ["senderId"]
     }
   },
   {
@@ -1928,10 +1974,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         senderId: { type: "string" }
       },
-      required: ["publicationId", "senderId"]
+      required: ["senderId"]
     }
   },
   {
@@ -2005,15 +2051,14 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         status: {
           type: "string",
           enum: ["active", "unsubscribed", "suppressed"]
         },
         query: { type: "string" },
         limit: { type: "number" }
-      },
-      required: ["publicationId"]
+      }
     }
   },
   {
@@ -2022,11 +2067,11 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         email: { type: "string" },
         referrerContactId: { type: "string" }
       },
-      required: ["publicationId", "email"]
+      required: ["email"]
     }
   },
   {
@@ -2035,14 +2080,14 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         contactId: { type: "string" },
         status: {
           type: "string",
           enum: ["active", "unsubscribed", "suppressed"]
         }
       },
-      required: ["publicationId", "contactId", "status"]
+      required: ["contactId", "status"]
     }
   },
   {
@@ -2052,7 +2097,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         csvText: { type: "string" },
         enrollInAutomations: {
           type: "boolean",
@@ -2069,7 +2114,7 @@ export const MCP_TOOLS = [
             "Acknowledges the blast radius of a LARGE enrolling import. Above 500 rows, an import with enrollInAutomations true is refused with `enrollment_too_large` and NOTHING is stored unless this is also true; the refusal message names this field and says how many contacts are involved, so send the same request again with it set once you have decided to go ahead. DEFAULTS TO FALSE. This is the same acknowledgement a Studio operator gives on the confirm screen, not a way around the check — everyone in the file will receive the automation's emails and they cannot be recalled. Ignored without enrollInAutomations, since a plain import enrolls nobody and is never limited by size."
         }
       },
-      required: ["publicationId", "csvText"]
+      required: ["csvText"]
     }
   },
   {
@@ -2078,10 +2123,9 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         limit: { type: "number" }
-      },
-      required: ["publicationId"]
+      }
     }
   },
   {
@@ -2090,10 +2134,9 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         limit: { type: "number" }
-      },
-      required: ["publicationId"]
+      }
     }
   },
   {
@@ -2102,13 +2145,13 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         milestoneId: { type: "string" },
         title: { type: "string" },
         description: { type: "string" },
         referralCount: { type: "number" }
       },
-      required: ["publicationId", "title", "referralCount"]
+      required: ["title", "referralCount"]
     }
   },
   {
@@ -2117,10 +2160,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         milestoneId: { type: "string" }
       },
-      required: ["publicationId", "milestoneId"]
+      required: ["milestoneId"]
     }
   },
   {
@@ -2129,11 +2172,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         contactId: { type: "string" },
         limit: { type: "number" }
-      },
-      required: ["publicationId"]
+      }
     }
   },
   {
@@ -2142,14 +2184,13 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         status: {
           type: "string",
           enum: ["draft", "active", "paused", "archived"]
         },
         limit: { type: "number" }
-      },
-      required: ["publicationId"]
+      }
     }
   },
   {
@@ -2158,7 +2199,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         offerId: { type: "string" },
         title: { type: "string" },
         sponsorName: { type: "string" },
@@ -2182,7 +2223,7 @@ export const MCP_TOOLS = [
           description: "Optional ISO end timestamp."
         }
       },
-      required: ["publicationId", "title", "sponsorName", "pricingModel", "rateCents"]
+      required: ["title", "sponsorName", "pricingModel", "rateCents"]
     }
   },
   {
@@ -2191,10 +2232,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         offerId: { type: "string" }
       },
-      required: ["publicationId", "offerId"]
+      required: ["offerId"]
     }
   },
   {
@@ -2203,10 +2244,9 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         limit: { type: "number" }
-      },
-      required: ["publicationId"]
+      }
     }
   },
   {
@@ -2217,7 +2257,8 @@ export const MCP_TOOLS = [
       properties: {
         publicationId: {
           type: "string",
-          description: "Optional publication id to include custom packs"
+          description:
+            "Optional. Include this publication's custom packs alongside the shared ones; omit for the shared catalog only. Unlike other tools this does NOT default to the connected publication — omitting it means something."
         }
       }
     }
@@ -2228,7 +2269,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         title: { type: "string" },
         description: { type: "string" },
         styleProfile: {
@@ -2252,7 +2293,7 @@ export const MCP_TOOLS = [
           minItems: 1
         }
       },
-      required: ["publicationId", "title", "sections"]
+      required: ["title", "sections"]
     }
   },
   {
@@ -2261,7 +2302,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         packId: { type: "string" },
         title: { type: "string" },
         description: { type: "string" },
@@ -2286,7 +2327,7 @@ export const MCP_TOOLS = [
           minItems: 1
         }
       },
-      required: ["publicationId", "packId", "title", "sections"]
+      required: ["packId", "title", "sections"]
     }
   },
   {
@@ -2295,10 +2336,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         packId: { type: "string" }
       },
-      required: ["publicationId", "packId"]
+      required: ["packId"]
     }
   },
   {
@@ -2307,11 +2348,11 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         packId: { type: "string" },
         limit: { type: "number" }
       },
-      required: ["publicationId", "packId"]
+      required: ["packId"]
     }
   },
   {
@@ -2320,11 +2361,11 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         packId: { type: "string" },
         revisionId: { type: "string" }
       },
-      required: ["publicationId", "packId", "revisionId"]
+      required: ["packId", "revisionId"]
     }
   },
   {
@@ -2333,10 +2374,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         templateId: { type: "string" }
       },
-      required: ["publicationId", "templateId"]
+      required: ["templateId"]
     }
   },
   {
@@ -2345,7 +2386,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         name: { type: "string" },
         contentJson: {
           type: "array",
@@ -2353,7 +2394,7 @@ export const MCP_TOOLS = [
           minItems: 1
         }
       },
-      required: ["publicationId", "name", "contentJson"]
+      required: ["name", "contentJson"]
     }
   },
   {
@@ -2401,7 +2442,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         title: { type: "string" },
         html: { type: "string" },
         plainText: { type: "string" },
@@ -2410,7 +2451,7 @@ export const MCP_TOOLS = [
           description: "Optional React Email style profile overrides."
         }
       },
-      required: ["publicationId", "title", "html"]
+      required: ["title", "html"]
     }
   },
   {
@@ -2419,10 +2460,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         issueId: { type: "string" }
       },
-      required: ["publicationId", "issueId"]
+      required: ["issueId"]
     }
   },
   {
@@ -2431,7 +2472,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         issueId: { type: "string" },
         timeoutMs: {
           type: "number",
@@ -2442,7 +2483,7 @@ export const MCP_TOOLS = [
           description: "Optional polling interval in milliseconds. Defaults to 2000."
         }
       },
-      required: ["publicationId", "issueId"]
+      required: ["issueId"]
     }
   },
   {
@@ -2451,10 +2492,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         issueId: { type: "string" }
       },
-      required: ["publicationId", "issueId"]
+      required: ["issueId"]
     }
   },
   {
@@ -2463,7 +2504,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         issueId: { type: "string" },
         range: {
           type: "string",
@@ -2471,7 +2512,7 @@ export const MCP_TOOLS = [
           description: "Analytics window. Defaults to 30d."
         }
       },
-      required: ["publicationId", "issueId"]
+      required: ["issueId"]
     }
   },
   {
@@ -2480,7 +2521,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         issueId: { type: "string" },
         range: {
           type: "string",
@@ -2488,7 +2529,7 @@ export const MCP_TOOLS = [
           description: "Analytics window. Defaults to 30d."
         }
       },
-      required: ["publicationId", "issueId"]
+      required: ["issueId"]
     }
   },
   {
@@ -2497,10 +2538,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: {
-          type: "string",
-          description: "Optional publication id. Falls back to MAILTEA_PUBLICATION_ID."
-        },
+        publicationId: PUBLICATION_ID_SCHEMA,
         range: {
           type: "string",
           enum: [...ISSUE_ANALYTICS_RANGES],
@@ -2515,7 +2553,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         issueId: { type: "string" },
         range: {
           type: "string",
@@ -2528,7 +2566,7 @@ export const MCP_TOOLS = [
           description: "CSV type. Defaults to combined."
         }
       },
-      required: ["publicationId", "issueId"]
+      required: ["issueId"]
     }
   },
   {
@@ -2537,7 +2575,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         issueId: { type: "string" },
         range: {
           type: "string",
@@ -2545,7 +2583,7 @@ export const MCP_TOOLS = [
           description: "Analytics window. Defaults to 30d."
         }
       },
-      required: ["publicationId", "issueId"]
+      required: ["issueId"]
     }
   },
   {
@@ -2554,7 +2592,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         issueId: { type: "string" },
         range: {
           type: "string",
@@ -2562,7 +2600,7 @@ export const MCP_TOOLS = [
           description: "Analytics window. Defaults to 30d."
         }
       },
-      required: ["publicationId", "issueId"]
+      required: ["issueId"]
     }
   },
   {
@@ -2646,14 +2684,14 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         prompt: { type: "string" },
         tone: {
           type: "string",
           enum: ["neutral", "friendly", "formal"]
         }
       },
-      required: ["publicationId", "prompt"]
+      required: ["prompt"]
     }
   },
   {
@@ -2662,7 +2700,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string", description: "Publication to create template in" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         name: { type: "string", description: "Template name (max 120 chars)" },
         html: { type: "string", description: "Raw HTML content (use this OR spec OR editor_doc)" },
         spec: {
@@ -2682,7 +2720,7 @@ export const MCP_TOOLS = [
         reply_to: { type: "string" },
         variables: TEMPLATE_VARIABLES_SCHEMA
       },
-      required: ["publicationId", "name"]
+      required: ["name"]
     }
   },
   {
@@ -2691,10 +2729,9 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         limit: { type: "number", description: "Max results (1-100, default 20)" }
-      },
-      required: ["publicationId"]
+      }
     }
   },
   {
@@ -2704,10 +2741,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         templateId: { type: "string" }
       },
-      required: ["publicationId", "templateId"]
+      required: ["templateId"]
     }
   },
   {
@@ -2716,7 +2753,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         templateId: { type: "string" },
         name: { type: "string" },
         html: { type: "string", description: "Raw HTML content (switches the template to raw HTML). Refused for a template that is already format \"editor\"." },
@@ -2754,7 +2791,7 @@ export const MCP_TOOLS = [
         reply_to: { type: "string" },
         variables: TEMPLATE_VARIABLES_SCHEMA
       },
-      required: ["publicationId", "templateId"]
+      required: ["templateId"]
     }
   },
   {
@@ -2764,10 +2801,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         templateId: { type: "string" }
       },
-      required: ["publicationId", "templateId"]
+      required: ["templateId"]
     }
   },
   {
@@ -2777,10 +2814,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         templateId: { type: "string" }
       },
-      required: ["publicationId", "templateId"]
+      required: ["templateId"]
     }
   },
   {
@@ -2790,7 +2827,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         templateId: { type: "string" },
         limit: {
           type: "number",
@@ -2798,7 +2835,7 @@ export const MCP_TOOLS = [
             "Max entries (positive integer). Omit for the full retained history; the server caps this at the retention maximum reported in retention.max_versions."
         }
       },
-      required: ["publicationId", "templateId"]
+      required: ["templateId"]
     }
   },
   {
@@ -2808,7 +2845,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         templateId: { type: "string" },
         version: {
           type: "number",
@@ -2816,7 +2853,7 @@ export const MCP_TOOLS = [
             "Version number to restore (a positive integer), as returned by template.versions."
         }
       },
-      required: ["publicationId", "templateId", "version"]
+      required: ["templateId", "version"]
     }
   },
   {
@@ -2825,10 +2862,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         templateId: { type: "string" }
       },
-      required: ["publicationId", "templateId"]
+      required: ["templateId"]
     }
   },
   {
@@ -2837,10 +2874,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         templateId: { type: "string" }
       },
-      required: ["publicationId", "templateId"]
+      required: ["templateId"]
     }
   },
   {
@@ -3057,11 +3094,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         limit: { type: "number", description: "Max results (1-100, default 20)." },
         cursor: { type: "string", description: "Opaque pagination cursor from a prior response's next_cursor." }
-      },
-      required: ["publicationId"]
+      }
     }
   },
   {
@@ -3156,7 +3192,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         name: { type: "string", description: "Domain host, e.g. 'mail.acme.com'." },
         purpose: {
           type: "string",
@@ -3185,7 +3221,7 @@ export const MCP_TOOLS = [
             "Serve open-pixel and click-tracking links from your own domain, e.g. 'links' gives links.acme.com. Adds a Tracking CNAME to 'records'; links stay on the platform host until it verifies. Letters, digits and hyphens only; a reserved label, or the one the return-path uses, is refused with code 'tracking_subdomain_invalid'. Unlike domain.update, null is NOT accepted here — a create has nothing to clear, and it is refused as a validation error. Leave the field out to create the domain without a tracking subdomain."
         }
       },
-      required: ["publicationId", "name"]
+      required: ["name"]
     }
   },
   {
@@ -3194,7 +3230,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         limit: { type: "number", description: "Max results (1-100, default 20)." },
         region: {
           type: "string",
@@ -3206,8 +3242,7 @@ export const MCP_TOOLS = [
           enum: ["pending", "verified"],
           description: "Only domains in this state."
         }
-      },
-      required: ["publicationId"]
+      }
     }
   },
   {
@@ -3216,10 +3251,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         domainId: { type: "string" }
       },
-      required: ["publicationId", "domainId"]
+      required: ["domainId"]
     }
   },
   {
@@ -3229,10 +3264,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         domainId: { type: "string" }
       },
-      required: ["publicationId", "domainId"]
+      required: ["domainId"]
     }
   },
   {
@@ -3242,7 +3277,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         domainId: { type: "string" },
         purpose: { type: "string", enum: ["email", "site", "both"] },
         is_primary: { type: "boolean" },
@@ -3273,7 +3308,7 @@ export const MCP_TOOLS = [
           anyOf: [{ type: "string" }, { type: "null" }]
         }
       },
-      required: ["publicationId", "domainId"]
+      required: ["domainId"]
     }
   },
   {
@@ -3282,10 +3317,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         domainId: { type: "string" }
       },
-      required: ["publicationId", "domainId"]
+      required: ["domainId"]
     }
   },
   // --- Domain claiming (REST /v1/domains/claim) ----------------------------
@@ -3299,7 +3334,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         name: { type: "string", description: "Domain host to claim, e.g. 'acme.com'." },
         region: {
           type: "string",
@@ -3308,7 +3343,7 @@ export const MCP_TOOLS = [
             "Where the claimed domain will send from once the claim completes. Fixed at that point, like any domain's region."
         }
       },
-      required: ["publicationId", "name"]
+      required: ["name"]
     }
   },
   {
@@ -3318,10 +3353,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         claimId: { type: "string" }
       },
-      required: ["publicationId", "claimId"]
+      required: ["claimId"]
     }
   },
   {
@@ -3331,10 +3366,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         claimId: { type: "string" }
       },
-      required: ["publicationId", "claimId"]
+      required: ["claimId"]
     }
   },
   {
@@ -3344,10 +3379,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         claimId: { type: "string" }
       },
-      required: ["publicationId", "claimId"]
+      required: ["claimId"]
     }
   },
   // --- Tracking sub-domains (CNAME, under a domain) -------------------------
@@ -3358,14 +3393,14 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         domainId: { type: "string", description: "Parent domain ID." },
         subdomain: {
           type: "string",
           description: "Sub-domain label (lowercase alphanumeric and hyphens), e.g. 'links'."
         }
       },
-      required: ["publicationId", "domainId", "subdomain"]
+      required: ["domainId", "subdomain"]
     }
   },
   {
@@ -3374,10 +3409,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         domainId: { type: "string" }
       },
-      required: ["publicationId", "domainId"]
+      required: ["domainId"]
     }
   },
   {
@@ -3387,11 +3422,11 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         domainId: { type: "string" },
         trackingDomainId: { type: "string" }
       },
-      required: ["publicationId", "domainId", "trackingDomainId"]
+      required: ["domainId", "trackingDomainId"]
     }
   },
   {
@@ -3400,11 +3435,11 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         domainId: { type: "string" },
         trackingDomainId: { type: "string" }
       },
-      required: ["publicationId", "domainId", "trackingDomainId"]
+      required: ["domainId", "trackingDomainId"]
     }
   },
   // --- Outbound webhooks (REST /v1/webhooks/endpoints) ----------------------
@@ -3415,7 +3450,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         endpoint: { type: "string", description: "HTTPS URL to deliver events to." },
         events: {
           type: "array",
@@ -3424,7 +3459,7 @@ export const MCP_TOOLS = [
             "Event types to subscribe to. One or more of: email.received, email.sent, email.delivered, email.delivery_delayed, email.bounced, email.complained, email.opened, email.clicked, email.failed, email.suppressed, contact.created, contact.updated, contact.deleted, contact.unsubscribed, contact.topic_subscribed, contact.topic_unsubscribed, automation.run.started, automation.run.completed, automation.run.failed, automation.run.exited, automation.step.completed. automation.run.exited is distinct from completed: it means the contact left the journey early (unsubscribed, suppressed, archived) and carries the reason. automation.step.completed fires for side-effecting steps only. contact.topic_subscribed and contact.topic_unsubscribed fire only on a genuine change in effective topic membership, so re-asserting an opt-out topic's default emits nothing."
         }
       },
-      required: ["publicationId", "endpoint", "events"]
+      required: ["endpoint", "events"]
     }
   },
   {
@@ -3433,10 +3468,9 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         limit: { type: "number", description: "Max results (1-100, default 20)." }
-      },
-      required: ["publicationId"]
+      }
     }
   },
   {
@@ -3445,10 +3479,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         webhookId: { type: "string" }
       },
-      required: ["publicationId", "webhookId"]
+      required: ["webhookId"]
     }
   },
   {
@@ -3457,13 +3491,13 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         webhookId: { type: "string" },
         endpoint: { type: "string" },
         events: { type: "array", items: { type: "string" } },
         status: { type: "string", enum: ["enabled", "disabled"] }
       },
-      required: ["publicationId", "webhookId"]
+      required: ["webhookId"]
     }
   },
   {
@@ -3472,10 +3506,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         webhookId: { type: "string" }
       },
-      required: ["publicationId", "webhookId"]
+      required: ["webhookId"]
     }
   },
   // --- Audience segments (REST /v1/segments) --------------------------------
@@ -3486,13 +3520,13 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         name: { type: "string" },
         description: { type: "string" },
         status_filter: { type: "string", enum: ["active", "unsubscribed", "suppressed"] },
         query_filter: { type: "string", description: "Search/filter expression over contacts." }
       },
-      required: ["publicationId", "name"]
+      required: ["name"]
     }
   },
   {
@@ -3501,10 +3535,9 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         limit: { type: "number", description: "Max results (1-100, default 20)." }
-      },
-      required: ["publicationId"]
+      }
     }
   },
   {
@@ -3513,10 +3546,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         segmentId: { type: "string" }
       },
-      required: ["publicationId", "segmentId"]
+      required: ["segmentId"]
     }
   },
   {
@@ -3525,7 +3558,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         segmentId: { type: "string" },
         name: { type: "string" },
         description: { type: "string" },
@@ -3539,7 +3572,7 @@ export const MCP_TOOLS = [
           description: "Search/filter expression, or null to clear it."
         }
       },
-      required: ["publicationId", "segmentId"]
+      required: ["segmentId"]
     }
   },
   {
@@ -3548,10 +3581,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         segmentId: { type: "string" }
       },
-      required: ["publicationId", "segmentId"]
+      required: ["segmentId"]
     }
   },
   // --- Contact custom properties (REST /v1/contact-properties; team-scoped) -
@@ -3614,10 +3647,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         idOrEmail: { type: "string", description: "Contact ID or email address." }
       },
-      required: ["publicationId", "idOrEmail"]
+      required: ["idOrEmail"]
     }
   },
   {
@@ -3626,10 +3659,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         idOrEmail: { type: "string", description: "Contact ID or email address." }
       },
-      required: ["publicationId", "idOrEmail"]
+      required: ["idOrEmail"]
     }
   },
   {
@@ -3638,10 +3671,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         contactId: { type: "string" }
       },
-      required: ["publicationId", "contactId"]
+      required: ["contactId"]
     }
   },
   {
@@ -3654,7 +3687,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         contactId: { type: "string" },
         values: {
           type: "array",
@@ -3679,7 +3712,7 @@ export const MCP_TOOLS = [
           }
         }
       },
-      required: ["publicationId", "contactId", "values"]
+      required: ["contactId", "values"]
     }
   },
   // --- Topic definitions (REST /v1/topics) ---------------------------------
@@ -3690,7 +3723,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         name: { type: "string" },
         default_subscription: {
           type: "string",
@@ -3706,7 +3739,7 @@ export const MCP_TOOLS = [
             "public = the topic appears on the reader preference page as its own subscription (what the industry calls an unsubscribe group), using its description as the reader-facing copy; private = internal only, never shown to readers."
         }
       },
-      required: ["publicationId", "name", "default_subscription"]
+      required: ["name", "default_subscription"]
     }
   },
   {
@@ -3715,10 +3748,9 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         limit: { type: "number", description: "Max results (1-100, default 20)." }
-      },
-      required: ["publicationId"]
+      }
     }
   },
   {
@@ -3727,7 +3759,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         topicId: { type: "string" },
         name: { type: "string" },
         description: { type: "string" },
@@ -3744,7 +3776,7 @@ export const MCP_TOOLS = [
             "public = the topic appears on the reader preference page as its own subscription (what the industry calls an unsubscribe group), using its description as the reader-facing copy; private = internal only, never shown to readers."
         }
       },
-      required: ["publicationId", "topicId"]
+      required: ["topicId"]
     }
   },
   {
@@ -3753,10 +3785,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         topicId: { type: "string" }
       },
-      required: ["publicationId", "topicId"]
+      required: ["topicId"]
     }
   },
   // --- API keys (REST /v1/api-keys; requires settings:write) ----------------
@@ -3803,7 +3835,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publication_id: { type: "string", description: "Publication the automation belongs to." },
+        publication_id: PUBLICATION_ID_SCHEMA,
         name: { type: "string", description: "Automation name (max 120 chars)." },
         description: { type: "string", description: "Optional description (max 500 chars)." },
         steps: AUTOMATION_STEPS_SCHEMA,
@@ -3826,7 +3858,7 @@ export const MCP_TOOLS = [
         },
         validate_only: AUTOMATION_VALIDATE_ONLY_SCHEMA
       },
-      required: ["publication_id", "name", "steps"]
+      required: ["name", "steps"]
     }
   },
   {
@@ -3835,7 +3867,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publication_id: { type: "string" },
+        publication_id: PUBLICATION_ID_SCHEMA,
         status: {
           type: "string",
           enum: ["draft", "active", "paused", "archived"],
@@ -3843,8 +3875,7 @@ export const MCP_TOOLS = [
         },
         limit: { type: "number", description: "Max results (1-100, default 20)." },
         after: { type: "string", description: "Cursor from a previous page." }
-      },
-      required: ["publication_id"]
+      }
     }
   },
   {
@@ -3853,10 +3884,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publication_id: { type: "string" },
+        publication_id: PUBLICATION_ID_SCHEMA,
         automation_id: { type: "string" }
       },
-      required: ["publication_id", "automation_id"]
+      required: ["automation_id"]
     }
   },
   {
@@ -3865,7 +3896,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publication_id: { type: "string" },
+        publication_id: PUBLICATION_ID_SCHEMA,
         automation_id: { type: "string" },
         name: { type: "string", description: "Automation name (max 120 chars)." },
         description: { type: "string", description: "Description (max 500 chars)." },
@@ -3885,7 +3916,7 @@ export const MCP_TOOLS = [
         on_step_failure: { type: "string", enum: ["fail", "continue"] },
         validate_only: AUTOMATION_VALIDATE_ONLY_SCHEMA
       },
-      required: ["publication_id", "automation_id"]
+      required: ["automation_id"]
     }
   },
   {
@@ -3894,11 +3925,11 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publication_id: { type: "string" },
+        publication_id: PUBLICATION_ID_SCHEMA,
         steps: AUTOMATION_STEPS_SCHEMA,
         connections: AUTOMATION_CONNECTIONS_SCHEMA
       },
-      required: ["publication_id", "steps"]
+      required: ["steps"]
     }
   },
   {
@@ -3907,10 +3938,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publication_id: { type: "string" },
+        publication_id: PUBLICATION_ID_SCHEMA,
         automation_id: { type: "string" }
       },
-      required: ["publication_id", "automation_id"]
+      required: ["automation_id"]
     }
   },
   {
@@ -3919,7 +3950,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publication_id: { type: "string" },
+        publication_id: PUBLICATION_ID_SCHEMA,
         automation_id: { type: "string" },
         cancel_runs: {
           type: "boolean",
@@ -3927,7 +3958,7 @@ export const MCP_TOOLS = [
           default: false
         }
       },
-      required: ["publication_id", "automation_id"]
+      required: ["automation_id"]
     }
   },
   {
@@ -3936,7 +3967,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publication_id: { type: "string" },
+        publication_id: PUBLICATION_ID_SCHEMA,
         automation_id: { type: "string" },
         cancel_runs: {
           type: "boolean",
@@ -3944,7 +3975,7 @@ export const MCP_TOOLS = [
           default: true
         }
       },
-      required: ["publication_id", "automation_id"]
+      required: ["automation_id"]
     }
   },
   {
@@ -3953,10 +3984,10 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publication_id: { type: "string" },
+        publication_id: PUBLICATION_ID_SCHEMA,
         automation_id: { type: "string" }
       },
-      required: ["publication_id", "automation_id"]
+      required: ["automation_id"]
     }
   },
   {
@@ -3965,12 +3996,12 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publication_id: { type: "string" },
+        publication_id: PUBLICATION_ID_SCHEMA,
         automation_id: { type: "string" },
         limit: { type: "number", description: "Max results (1-100, default 20)." },
         after: { type: "string", description: "Cursor from a previous page." }
       },
-      required: ["publication_id", "automation_id"]
+      required: ["automation_id"]
     }
   },
   {
@@ -3979,7 +4010,7 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        publication_id: { type: "string" },
+        publication_id: PUBLICATION_ID_SCHEMA,
         automation_id: { type: "string" },
         version: {
           type: "number",
@@ -3987,7 +4018,7 @@ export const MCP_TOOLS = [
             "Version number (a positive integer), as returned by automation.versions or as run.version on a run."
         }
       },
-      required: ["publication_id", "automation_id", "version"]
+      required: ["automation_id", "version"]
     }
   },
   {
@@ -4001,7 +4032,7 @@ READING THE RESPONSE — three points, each of which otherwise produces a confid
     inputSchema: {
       type: "object",
       properties: {
-        publication_id: { type: "string" },
+        publication_id: PUBLICATION_ID_SCHEMA,
         automation_id: { type: "string" },
         version: {
           type: "number",
@@ -4011,7 +4042,7 @@ READING THE RESPONSE — three points, each of which otherwise produces a confid
         since: { type: "string", description: "ISO 8601 lower bound." },
         until: { type: "string", description: "ISO 8601 upper bound." }
       },
-      required: ["publication_id", "automation_id"]
+      required: ["automation_id"]
     }
   },
   {
@@ -4020,7 +4051,7 @@ READING THE RESPONSE — three points, each of which otherwise produces a confid
     inputSchema: {
       type: "object",
       properties: {
-        publication_id: { type: "string" },
+        publication_id: PUBLICATION_ID_SCHEMA,
         automation_id: { type: "string" },
         status: {
           type: "string",
@@ -4032,7 +4063,7 @@ READING THE RESPONSE — three points, each of which otherwise produces a confid
         limit: { type: "number", description: "Max results (1-100, default 20)." },
         after: { type: "string", description: "Cursor from a previous page." }
       },
-      required: ["publication_id", "automation_id"]
+      required: ["automation_id"]
     }
   },
   {
@@ -4043,11 +4074,11 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publication_id: { type: "string" },
+        publication_id: PUBLICATION_ID_SCHEMA,
         automation_id: { type: "string" },
         run_id: { type: "string" }
       },
-      required: ["publication_id", "automation_id", "run_id"]
+      required: ["automation_id", "run_id"]
     }
   },
   {
@@ -4056,11 +4087,11 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publication_id: { type: "string" },
+        publication_id: PUBLICATION_ID_SCHEMA,
         automation_id: { type: "string" },
         run_id: { type: "string" }
       },
-      required: ["publication_id", "automation_id", "run_id"]
+      required: ["automation_id", "run_id"]
     }
   },
   {
@@ -4069,7 +4100,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publication_id: { type: "string" },
+        publication_id: PUBLICATION_ID_SCHEMA,
         event_name: {
           type: "string",
           description: "Event name, pattern ^[a-z0-9][a-z0-9._-]{0,63}$. Sent as `name` to the API."
@@ -4090,7 +4121,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
         occurred_at: { type: "string", description: "ISO 8601 timestamp. Defaults to now." },
         idempotency_key: { type: "string", description: "Replay guard; see the description." }
       },
-      required: ["publication_id", "event_name"]
+      required: ["event_name"]
     }
   },
   {
@@ -4099,11 +4130,10 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publication_id: { type: "string" },
+        publication_id: PUBLICATION_ID_SCHEMA,
         limit: { type: "number", description: "Max results (1-100, default 20)." },
         after: { type: "string", description: "Cursor from a previous page." }
-      },
-      required: ["publication_id"]
+      }
     }
   },
   {
@@ -4112,10 +4142,10 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publication_id: { type: "string" },
+        publication_id: PUBLICATION_ID_SCHEMA,
         definition_id: { type: "string" }
       },
-      required: ["publication_id", "definition_id"]
+      required: ["definition_id"]
     }
   },
   {
@@ -4124,7 +4154,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publication_id: { type: "string" },
+        publication_id: PUBLICATION_ID_SCHEMA,
         event_name: {
           type: "string",
           description: "Event name, pattern ^[a-z0-9][a-z0-9._-]{0,63}$. Sent as `name` to the API."
@@ -4136,7 +4166,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
             "Event schema document — NOT JSON Schema. Only the keys {properties, additional_properties} are accepted; see the tool description for the grammar and an example."
         }
       },
-      required: ["publication_id", "event_name"]
+      required: ["event_name"]
     }
   },
   {
@@ -4145,7 +4175,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publication_id: { type: "string" },
+        publication_id: PUBLICATION_ID_SCHEMA,
         definition_id: { type: "string" },
         description: { type: "string" },
         schema_json: {
@@ -4154,7 +4184,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
             "Event schema document — NOT JSON Schema. Only the keys {properties, additional_properties} are accepted; see the tool description for the grammar and an example. Pass null to clear the stored schema, or omit the key to leave it alone."
         }
       },
-      required: ["publication_id", "definition_id"]
+      required: ["definition_id"]
     }
   },
   {
@@ -4163,10 +4193,10 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publication_id: { type: "string" },
+        publication_id: PUBLICATION_ID_SCHEMA,
         definition_id: { type: "string" }
       },
-      required: ["publication_id", "definition_id"]
+      required: ["definition_id"]
     }
   },
   {
@@ -4175,9 +4205,8 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" }
-      },
-      required: ["publicationId"]
+        publicationId: PUBLICATION_ID_SCHEMA
+      }
     }
   },
   {
@@ -4187,9 +4216,8 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" }
-      },
-      required: ["publicationId"]
+        publicationId: PUBLICATION_ID_SCHEMA
+      }
     }
   },
   {
@@ -4198,7 +4226,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         pageId: { type: "string", description: "Page id. Takes precedence over slug and kind." },
         slug: { type: "string", description: "Page slug, e.g. \"home\"." },
         kind: {
@@ -4206,8 +4234,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
           enum: ["home", "archive", "post", "subscribe", "unsubscribe", "unsubscribe_success"],
           description: "Page kind. Defaults to \"home\" when no pageId or slug is given."
         }
-      },
-      required: ["publicationId"]
+      }
     }
   },
   {
@@ -4216,7 +4243,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         id: { type: "string", description: "Existing page id. Omit to create a new page." },
         kind: {
           type: "string",
@@ -4255,7 +4282,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
         seoDescription: { type: ["string", "null"] },
         seoOgImageUrl: { type: ["string", "null"] }
       },
-      required: ["publicationId", "kind", "slug", "title"]
+      required: ["kind", "slug", "title"]
     }
   },
   {
@@ -4264,7 +4291,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         pageId: {
           type: "string",
           description:
@@ -4286,7 +4313,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
             "The draftVersion this batch was composed against (from site.get). On a mismatch the write is refused with 'site draft changed elsewhere' — re-read the site and rebuild the batch rather than retrying it blind."
         }
       },
-      required: ["publicationId", "ops"]
+      required: ["ops"]
     }
   },
     {
@@ -4296,9 +4323,8 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" }
-      },
-      required: ["publicationId"]
+        publicationId: PUBLICATION_ID_SCHEMA
+      }
     }
   },
 {
@@ -4308,9 +4334,8 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" }
-      },
-      required: ["publicationId"]
+        publicationId: PUBLICATION_ID_SCHEMA
+      }
     }
   },
 {
@@ -4320,9 +4345,8 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" }
-      },
-      required: ["publicationId"]
+        publicationId: PUBLICATION_ID_SCHEMA
+      }
     }
   },
   {
@@ -4332,9 +4356,8 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" }
-      },
-      required: ["publicationId"]
+        publicationId: PUBLICATION_ID_SCHEMA
+      }
     }
   },
   {
@@ -4344,13 +4367,13 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         designBrief: {
           type: ["string", "null"],
           description: "Markdown brief, or null to clear."
         }
       },
-      required: ["publicationId", "designBrief"]
+      required: ["designBrief"]
     }
   },
   {
@@ -4360,9 +4383,8 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" }
-      },
-      required: ["publicationId"]
+        publicationId: PUBLICATION_ID_SCHEMA
+      }
     }
   },
   {
@@ -4372,9 +4394,8 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" }
-      },
-      required: ["publicationId"]
+        publicationId: PUBLICATION_ID_SCHEMA
+      }
     }
   },
   {
@@ -4384,11 +4405,10 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         search: { type: "string", description: "Filter by file name." },
         limit: { type: "number", description: "Max assets to return (1-200, default 50)." }
-      },
-      required: ["publicationId"]
+      }
     }
   },
   {
@@ -4398,7 +4418,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         contentType: {
           type: "string",
           enum: ["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"],
@@ -4417,7 +4437,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
         width: { type: "number", description: "Pixel width, when known." },
         height: { type: "number", description: "Pixel height, when known." }
       },
-      required: ["publicationId", "contentType", "dataBase64"]
+      required: ["contentType", "dataBase64"]
     }
   },
   {
@@ -4427,10 +4447,10 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     inputSchema: {
       type: "object",
       properties: {
-        publicationId: { type: "string" },
+        publicationId: PUBLICATION_ID_SCHEMA,
         assetId: { type: "string", description: "The asset's id, from site.asset_list." }
       },
-      required: ["publicationId", "assetId"]
+      required: ["assetId"]
     }
   }
 ] as const;
@@ -4853,11 +4873,52 @@ function resolveToken(options: McpRuntimeOptions): string | null {
 }
 
 function resolvePublicationId(options: McpRuntimeOptions): string | null {
-  return (
-    asOptionalString(options.publicationId ?? undefined) ??
-    asOptionalString(process.env.MAILTEA_PUBLICATION_ID) ??
-    null
-  );
+  const connected = asOptionalString(options.publicationId ?? undefined);
+  if (connected) {
+    return connected;
+  }
+
+  if (options.envPublicationFallback === false) {
+    return null;
+  }
+
+  return asOptionalString(process.env.MAILTEA_PUBLICATION_ID) ?? null;
+}
+
+/**
+ * The publication a tool call acts on: the explicit argument, else the one this
+ * connection is already authorized for.
+ *
+ * `options.publicationId` is the connection's publication — the hosted endpoint
+ * fills it from the OAuth grant, stdio from `MAILTEA_PUBLICATION_ID`. Using it
+ * as a default widens nothing: the server refuses any publication but the
+ * credential's own, so the only id an agent could successfully have typed is
+ * the one substituted here. An explicit argument still wins, and an explicit
+ * argument naming a DIFFERENT publication still travels to the server and is
+ * still rejected there — this resolves an id, it does not authorize one.
+ *
+ * The message when nothing resolves is deliberately the one `readRequiredString`
+ * has always thrown: a stdio user with no `MAILTEA_PUBLICATION_ID` and no
+ * argument is in exactly the position they were in before.
+ */
+function readPublicationId(
+  args: Record<string, unknown>,
+  options: McpRuntimeOptions,
+  // The automation and event tools spell their arguments snake_case; the error
+  // has to name the key the caller actually passes.
+  key: "publicationId" | "publication_id" = "publicationId"
+): string {
+  const explicit = asOptionalString(args[key]);
+  if (explicit) {
+    return explicit;
+  }
+
+  const connected = resolvePublicationId(options);
+  if (connected) {
+    return connected;
+  }
+
+  throw new Error(`Missing required string argument: ${key}`);
 }
 
 function parseAnalyticsSummaryUri(uri: string): { publicationId?: string; range: IssueAnalyticsRange } | null {
@@ -5171,7 +5232,7 @@ async function runTool(
   }
 
   if (toolName === "issue.create_draft") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const title = readRequiredString(args, "title");
     const kind = args.kind === "broadcast" ? "broadcast" : args.kind === "newsletter" ? "newsletter" : undefined;
     const templateId = asOptionalString(args.templateId);
@@ -5364,7 +5425,7 @@ async function runTool(
   }
 
   if (toolName === "issue.list_recent") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const requestedLimit = readOptionalNumber(args, "limit");
     const limit = Math.max(1, Math.min(50, Math.trunc(requestedLimit ?? 10)));
 
@@ -5423,7 +5484,7 @@ async function runTool(
   }
 
   if (toolName === "publication.domain_list") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const requestedLimit = readOptionalNumber(args, "limit");
     const limit = Math.max(1, Math.min(100, Math.trunc(requestedLimit ?? 50)));
 
@@ -5446,7 +5507,7 @@ async function runTool(
   }
 
   if (toolName === "publication.domain_upsert") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const host = readRequiredString(args, "host");
     const isPrimary = readOptionalBoolean(args, "isPrimary");
     const proxyTarget = asOptionalString(args.proxyTarget);
@@ -5469,7 +5530,7 @@ async function runTool(
   }
 
   if (toolName === "publication.domain_verify") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
     const verificationValue = asOptionalString(args.verificationValue);
 
@@ -5490,7 +5551,7 @@ async function runTool(
   }
 
   if (toolName === "publication.domain_set_primary") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
 
     const result = await callTrpc<PublicationDomainUpsertResult>(
@@ -5506,7 +5567,7 @@ async function runTool(
   }
 
   if (toolName === "publication.domain_remove") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
 
     const result = await callTrpc<PublicationDomainRemoveResult>(
@@ -5522,7 +5583,7 @@ async function runTool(
   }
 
   if (toolName === "publication.domain_traefik_preview") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
 
     const preview = await callTrpc<PublicationDomainTraefikPreview>(
       "publication.domainTraefikPreview",
@@ -5540,7 +5601,7 @@ async function runTool(
   }
 
   if (toolName === "sender.list") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const requestedLimit = readOptionalNumber(args, "limit");
     const limit = Math.max(1, Math.min(100, Math.trunc(requestedLimit ?? 100)));
 
@@ -5560,7 +5621,7 @@ async function runTool(
   }
 
   if (toolName === "sender.create") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const name = readRequiredString(args, "name");
     const email = readRequiredString(args, "email");
     const replyTo = asOptionalString(args.replyTo);
@@ -5585,7 +5646,7 @@ async function runTool(
   }
 
   if (toolName === "sender.update") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const senderId = readRequiredString(args, "senderId");
     const name = asOptionalString(args.name);
     const replyTo = asOptionalString(args.replyTo);
@@ -5607,7 +5668,7 @@ async function runTool(
   }
 
   if (toolName === "sender.set_default") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const senderId = readRequiredString(args, "senderId");
 
     const result = await callTrpc<SenderMutationResult>(
@@ -5620,7 +5681,7 @@ async function runTool(
   }
 
   if (toolName === "sender.delete") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const senderId = readRequiredString(args, "senderId");
 
     const result = await callTrpc<SenderRemoveResult>(
@@ -5708,7 +5769,7 @@ async function runTool(
   }
 
   if (toolName === "contact.list") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const status = readContactStatus(args, "status");
     const query = asOptionalString(args.query);
     const requestedLimit = readOptionalNumber(args, "limit");
@@ -5738,7 +5799,7 @@ async function runTool(
   }
 
   if (toolName === "contact.upsert") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const email = readRequiredString(args, "email");
     const referrerContactId = asOptionalString(args.referrerContactId);
 
@@ -5758,7 +5819,7 @@ async function runTool(
   }
 
   if (toolName === "contact.set_status") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const contactId = readRequiredString(args, "contactId");
     const status = readContactStatus(args, "status");
     if (!status) {
@@ -5781,7 +5842,7 @@ async function runTool(
   }
 
   if (toolName === "contact.import_csv") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const csvText = readRequiredString(args, "csvText");
     // Both omitted rather than sent as false: the procedure defaults both to
     // false, and an absent key keeps the payload identical to what every
@@ -5807,7 +5868,7 @@ async function runTool(
   }
 
   if (toolName === "contact.referral_summary") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const requestedLimit = readOptionalNumber(args, "limit");
     const limit = Math.max(1, Math.min(100, Math.trunc(requestedLimit ?? 20)));
 
@@ -5830,7 +5891,7 @@ async function runTool(
   }
 
   if (toolName === "contact.referral_milestones") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const requestedLimit = readOptionalNumber(args, "limit");
     const limit = Math.max(1, Math.min(200, Math.trunc(requestedLimit ?? 100)));
 
@@ -5853,7 +5914,7 @@ async function runTool(
   }
 
   if (toolName === "contact.referral_milestone_upsert") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const title = readRequiredString(args, "title");
     const description = asOptionalString(args.description);
     const milestoneId = asOptionalString(args.milestoneId);
@@ -5885,7 +5946,7 @@ async function runTool(
   }
 
   if (toolName === "contact.referral_milestone_remove") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const milestoneId = readRequiredString(args, "milestoneId");
 
     const result = await callTrpc<{ removed: boolean; milestoneId: string }>(
@@ -5901,7 +5962,7 @@ async function runTool(
   }
 
   if (toolName === "contact.referral_rewards") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const contactId = asOptionalString(args.contactId);
     const requestedLimit = readOptionalNumber(args, "limit");
     const limit = Math.max(1, Math.min(500, Math.trunc(requestedLimit ?? 100)));
@@ -5926,7 +5987,7 @@ async function runTool(
   }
 
   if (toolName === "monetize.offer_list") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const status = readSponsorOfferStatus(args, "status");
     const requestedLimit = readOptionalNumber(args, "limit");
     const limit = Math.max(1, Math.min(200, Math.trunc(requestedLimit ?? 100)));
@@ -5951,7 +6012,7 @@ async function runTool(
   }
 
   if (toolName === "monetize.offer_upsert") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const offerId = asOptionalString(args.offerId);
     const title = readRequiredString(args, "title");
     const sponsorName = readRequiredString(args, "sponsorName");
@@ -5996,7 +6057,7 @@ async function runTool(
   }
 
   if (toolName === "monetize.offer_remove") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const offerId = readRequiredString(args, "offerId");
 
     const result = await callTrpc<SponsorOfferRemoveResult>(
@@ -6012,7 +6073,7 @@ async function runTool(
   }
 
   if (toolName === "section.list") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const requestedLimit = readOptionalNumber(args, "limit");
     const limit = Math.max(1, Math.min(200, Math.trunc(requestedLimit ?? 100)));
 
@@ -6052,7 +6113,7 @@ async function runTool(
   }
 
   if (toolName === "section.pack_create") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const title = readRequiredString(args, "title");
     const description = asOptionalString(args.description);
     const styleProfile = readOptionalJsonObject(args, "styleProfile");
@@ -6074,7 +6135,7 @@ async function runTool(
   }
 
   if (toolName === "section.pack_update") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const packId = readRequiredString(args, "packId");
     const title = readRequiredString(args, "title");
     const description = asOptionalString(args.description);
@@ -6098,7 +6159,7 @@ async function runTool(
   }
 
   if (toolName === "section.pack_remove") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const packId = readRequiredString(args, "packId");
 
     const result = await callTrpc<SectionPackRemoveResult>(
@@ -6114,7 +6175,7 @@ async function runTool(
   }
 
   if (toolName === "section.pack_revisions") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const packId = readRequiredString(args, "packId");
     const requestedLimit = readOptionalNumber(args, "limit");
     const limit = Math.max(1, Math.min(100, Math.trunc(requestedLimit ?? 30)));
@@ -6143,7 +6204,7 @@ async function runTool(
   }
 
   if (toolName === "section.pack_restore_revision") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const packId = readRequiredString(args, "packId");
     const revisionId = readRequiredString(args, "revisionId");
 
@@ -6164,7 +6225,7 @@ async function runTool(
   }
 
   if (toolName === "section.import_pack") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const templateId = readRequiredString(args, "templateId");
 
     const result = await callTrpc<SectionImportResult>(
@@ -6183,7 +6244,7 @@ async function runTool(
   }
 
   if (toolName === "section.create") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const name = readRequiredString(args, "name");
     const contentJson = readRequiredJsonObjectArray(args, "contentJson");
 
@@ -6242,7 +6303,7 @@ async function runTool(
   }
 
   if (toolName === "issue.preview_draft") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const title = readRequiredString(args, "title");
     const html = readRequiredString(args, "html");
     const plainText = asOptionalString(args.plainText);
@@ -6267,7 +6328,7 @@ async function runTool(
   }
 
   if (toolName === "issue.delivery_progress") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const issueId = readRequiredString(args, "issueId");
     const progress = await callTrpc<IssueDeliveryProgress>(
       "issue.deliveryProgress",
@@ -6293,7 +6354,7 @@ async function runTool(
   }
 
   if (toolName === "issue.wait_delivery") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const issueId = readRequiredString(args, "issueId");
     const timeoutMs = Math.max(1_000, Math.min(300_000, Math.trunc(readOptionalNumber(args, "timeoutMs") ?? 60_000)));
     const pollIntervalMs = Math.max(250, Math.min(10_000, Math.trunc(readOptionalNumber(args, "pollIntervalMs") ?? 2_000)));
@@ -6338,7 +6399,7 @@ async function runTool(
   }
 
   if (toolName === "analytics.poll_results") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const issueId = readRequiredString(args, "issueId");
     const analytics = await callTrpc<IssuePollResults>(
       "issue.pollResults",
@@ -6359,7 +6420,7 @@ async function runTool(
   }
 
   if (toolName === "analytics.issue_performance") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const issueId = readRequiredString(args, "issueId");
     const range = readIssueAnalyticsRange(args, "range") ?? DEFAULT_ISSUE_ANALYTICS_RANGE;
     const analytics = await callTrpc<IssueAnalytics>(
@@ -6380,7 +6441,7 @@ async function runTool(
   }
 
   if (toolName === "analytics.issue_export_csv") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const issueId = readRequiredString(args, "issueId");
     const range = readIssueAnalyticsRange(args, "range") ?? DEFAULT_ISSUE_ANALYTICS_RANGE;
     const exportType = readIssueAnalyticsExportType(args, "exportType") ?? "combined";
@@ -6403,7 +6464,7 @@ async function runTool(
   }
 
   if (toolName === "analytics.issue_export_performance_csv") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const issueId = readRequiredString(args, "issueId");
     const range = readIssueAnalyticsRange(args, "range") ?? DEFAULT_ISSUE_ANALYTICS_RANGE;
     const exported = await callTrpc<IssueAnalyticsCsv>(
@@ -6425,7 +6486,7 @@ async function runTool(
   }
 
   if (toolName === "analytics.issue_export_polls_csv") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const issueId = readRequiredString(args, "issueId");
     const range = readIssueAnalyticsRange(args, "range") ?? DEFAULT_ISSUE_ANALYTICS_RANGE;
     const exported = await callTrpc<IssueAnalyticsCsv>(
@@ -6447,7 +6508,7 @@ async function runTool(
   }
 
   if (toolName === "analytics.issue_trend") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const issueId = readRequiredString(args, "issueId");
     const range = readIssueAnalyticsRange(args, "range") ?? DEFAULT_ISSUE_ANALYTICS_RANGE;
     const trend = await callTrpc<IssueAnalyticsTrend>(
@@ -6606,7 +6667,7 @@ async function runTool(
   }
 
   if (toolName === "ai.generate_draft") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const prompt = readRequiredString(args, "prompt");
     const tone = asOptionalString(args.tone);
 
@@ -6628,7 +6689,7 @@ async function runTool(
   }
 
   if (toolName === "template.create") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const name = readRequiredString(args, "name");
     const html = asOptionalString(args.html);
     const spec = args.spec as Record<string, unknown> | undefined;
@@ -6692,7 +6753,7 @@ async function runTool(
   }
 
   if (toolName === "template.list") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const limit = readOptionalNumber(args, "limit") ?? 20;
 
     const result = await callRestApi<{ data: Array<Record<string, unknown>>; has_more: boolean }>(
@@ -6712,7 +6773,7 @@ async function runTool(
   }
 
   if (toolName === "template.get") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const templateId = readRequiredString(args, "templateId");
 
     const template = await callRestApi<Record<string, unknown>>(
@@ -6729,7 +6790,7 @@ async function runTool(
   }
 
   if (toolName === "template.update") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const templateId = readRequiredString(args, "templateId");
     const name = asOptionalString(args.name);
     const html = asOptionalString(args.html);
@@ -6786,7 +6847,7 @@ async function runTool(
   }
 
   if (toolName === "template.publish") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const templateId = readRequiredString(args, "templateId");
 
     const template = await callRestApi<Record<string, unknown>>(
@@ -6800,7 +6861,7 @@ async function runTool(
   }
 
   if (toolName === "template.unpublish") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const templateId = readRequiredString(args, "templateId");
 
     const template = await callRestApi<Record<string, unknown>>(
@@ -6814,7 +6875,7 @@ async function runTool(
   }
 
   if (toolName === "template.versions") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const templateId = readRequiredString(args, "templateId");
     const limit = readOptionalNumber(args, "limit");
 
@@ -6845,7 +6906,7 @@ async function runTool(
   }
 
   if (toolName === "template.restore_version") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const templateId = readRequiredString(args, "templateId");
     const version = readOptionalNumber(args, "version");
     if (version === undefined) {
@@ -6884,7 +6945,7 @@ async function runTool(
   }
 
   if (toolName === "template.duplicate") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const templateId = readRequiredString(args, "templateId");
 
     const template = await callRestApi<Record<string, unknown>>(
@@ -6898,7 +6959,7 @@ async function runTool(
   }
 
   if (toolName === "template.delete") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const templateId = readRequiredString(args, "templateId");
 
     const result = await callRestApi<{ id: string; deleted: boolean }>(
@@ -7110,7 +7171,7 @@ async function runTool(
 
   // --- Inbound email --------------------------------------------------------
   if (toolName === "email.inbound_list") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const limit = readOptionalNumber(args, "limit");
     const cursor = asOptionalString(args.cursor);
     const params = new URLSearchParams({ publication_id: publicationId });
@@ -7222,7 +7283,7 @@ async function runTool(
 
   // --- Email sending domains -----------------------------------------------
   if (toolName === "domain.create") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const name = readRequiredString(args, "name");
     const purpose = asOptionalString(args.purpose);
     const isPrimary = readOptionalBoolean(args, "is_primary");
@@ -7261,7 +7322,7 @@ async function runTool(
   }
 
   if (toolName === "domain.list") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const limit = readOptionalNumber(args, "limit");
     const params = new URLSearchParams({ publication_id: publicationId });
     if (limit !== undefined) params.set("limit", String(limit));
@@ -7279,7 +7340,7 @@ async function runTool(
   }
 
   if (toolName === "domain.get") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
     const result = await callRestApi<{ id: string; name: string; status: string; records: unknown[] }>(
       "GET",
@@ -7291,7 +7352,7 @@ async function runTool(
   }
 
   if (toolName === "domain.verify") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
     const result = await callRestApi<{ id: string; name: string; status: string }>(
       "POST",
@@ -7303,7 +7364,7 @@ async function runTool(
   }
 
   if (toolName === "domain.update") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
     const purpose = asOptionalString(args.purpose);
     const isPrimary = readOptionalBoolean(args, "is_primary");
@@ -7397,7 +7458,7 @@ async function runTool(
   }
 
   if (toolName === "domain.delete") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
     const result = await callRestApi<{ id: string }>(
       "DELETE",
@@ -7410,7 +7471,7 @@ async function runTool(
 
   // --- Domain claiming ------------------------------------------------------
   if (toolName === "domain.claim") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const name = readRequiredString(args, "name");
     const region = asOptionalString(args.region);
     const result = await callRestApi<{
@@ -7443,7 +7504,7 @@ async function runTool(
   }
 
   if (toolName === "domain.claim_get") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const claimId = readRequiredString(args, "claimId");
     const result = await callRestApi<{
       id: string;
@@ -7466,7 +7527,7 @@ async function runTool(
   }
 
   if (toolName === "domain.claim_verify") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const claimId = readRequiredString(args, "claimId");
     const result = await callRestApi<{
       id: string;
@@ -7493,7 +7554,7 @@ async function runTool(
   }
 
   if (toolName === "domain.claim_cancel") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const claimId = readRequiredString(args, "claimId");
     const result = await callRestApi<{ id: string }>(
       "DELETE",
@@ -7506,7 +7567,7 @@ async function runTool(
 
   // --- Tracking sub-domains -------------------------------------------------
   if (toolName === "domain.tracking_create") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
     const subdomain = readRequiredString(args, "subdomain");
     const result = await callRestApi<{ id: string; full_name: string; status: string }>(
@@ -7522,7 +7583,7 @@ async function runTool(
   }
 
   if (toolName === "domain.tracking_list") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
     const result = await callRestApi<{ data: unknown[] }>(
       "GET",
@@ -7534,7 +7595,7 @@ async function runTool(
   }
 
   if (toolName === "domain.tracking_verify") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
     const trackingDomainId = readRequiredString(args, "trackingDomainId");
     const result = await callRestApi<{ id: string; full_name: string; status: string }>(
@@ -7547,7 +7608,7 @@ async function runTool(
   }
 
   if (toolName === "domain.tracking_delete") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
     const trackingDomainId = readRequiredString(args, "trackingDomainId");
     const result = await callRestApi<{ id: string }>(
@@ -7561,7 +7622,7 @@ async function runTool(
 
   // --- Outbound webhooks ----------------------------------------------------
   if (toolName === "webhook.create") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const endpoint = readRequiredString(args, "endpoint");
     const events = args.events;
     if (!Array.isArray(events) || events.length === 0 || !events.every((e) => typeof e === "string")) {
@@ -7580,7 +7641,7 @@ async function runTool(
   }
 
   if (toolName === "webhook.list") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const limit = readOptionalNumber(args, "limit");
     const params = new URLSearchParams({ publication_id: publicationId });
     if (limit !== undefined) params.set("limit", String(limit));
@@ -7594,7 +7655,7 @@ async function runTool(
   }
 
   if (toolName === "webhook.get") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const webhookId = readRequiredString(args, "webhookId");
     const result = await callRestApi<{ id: string; endpoint: string; status: string }>(
       "GET",
@@ -7606,7 +7667,7 @@ async function runTool(
   }
 
   if (toolName === "webhook.update") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const webhookId = readRequiredString(args, "webhookId");
     const endpoint = asOptionalString(args.endpoint);
     const status = asOptionalString(args.status);
@@ -7631,7 +7692,7 @@ async function runTool(
   }
 
   if (toolName === "webhook.delete") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const webhookId = readRequiredString(args, "webhookId");
     const result = await callRestApi<{ id: string }>(
       "DELETE",
@@ -7644,7 +7705,7 @@ async function runTool(
 
   // --- Audience segments ----------------------------------------------------
   if (toolName === "segment.create") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const name = readRequiredString(args, "name");
     const description = asOptionalString(args.description);
     const statusFilter = asOptionalString(args.status_filter);
@@ -7665,7 +7726,7 @@ async function runTool(
   }
 
   if (toolName === "segment.list") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const limit = readOptionalNumber(args, "limit");
     const params = new URLSearchParams({ publication_id: publicationId });
     if (limit !== undefined) params.set("limit", String(limit));
@@ -7679,7 +7740,7 @@ async function runTool(
   }
 
   if (toolName === "segment.get") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const segmentId = readRequiredString(args, "segmentId");
     const result = await callRestApi<{ id: string; name: string }>(
       "GET",
@@ -7691,7 +7752,7 @@ async function runTool(
   }
 
   if (toolName === "segment.update") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const segmentId = readRequiredString(args, "segmentId");
     const name = asOptionalString(args.name);
     const description = asOptionalString(args.description);
@@ -7713,7 +7774,7 @@ async function runTool(
   }
 
   if (toolName === "segment.delete") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const segmentId = readRequiredString(args, "segmentId");
     const result = await callRestApi<{ id: string }>(
       "DELETE",
@@ -7788,7 +7849,7 @@ async function runTool(
 
   // --- Contact completeness -------------------------------------------------
   if (toolName === "contact.get") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const idOrEmail = readRequiredString(args, "idOrEmail");
     const result = await callRestApi<{ id: string; email: string; status: string }>(
       "GET",
@@ -7800,7 +7861,7 @@ async function runTool(
   }
 
   if (toolName === "contact.delete") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const idOrEmail = readRequiredString(args, "idOrEmail");
     const result = await callRestApi<{ id: string }>(
       "DELETE",
@@ -7812,7 +7873,7 @@ async function runTool(
   }
 
   if (toolName === "contact.get_properties") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const contactId = readRequiredString(args, "contactId");
     const result = await callTrpc<unknown>(
       "contact.getPropertyValues",
@@ -7824,7 +7885,7 @@ async function runTool(
   }
 
   if (toolName === "contact.set_properties") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const contactId = readRequiredString(args, "contactId");
     const values = args.values;
     if (!Array.isArray(values) || values.length === 0) {
@@ -7844,7 +7905,7 @@ async function runTool(
 
   // --- Topic definitions ----------------------------------------------------
   if (toolName === "topic.create") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const name = readRequiredString(args, "name");
     const defaultSubscription = asOptionalString(args.default_subscription);
     if (defaultSubscription !== "opt_in" && defaultSubscription !== "opt_out") {
@@ -7868,7 +7929,7 @@ async function runTool(
   }
 
   if (toolName === "topic.list") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const limit = readOptionalNumber(args, "limit");
     const params = new URLSearchParams({ publication_id: publicationId });
     if (limit !== undefined) params.set("limit", String(limit));
@@ -7882,7 +7943,7 @@ async function runTool(
   }
 
   if (toolName === "topic.update") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const topicId = readRequiredString(args, "topicId");
     const name = asOptionalString(args.name);
     const description = asOptionalString(args.description);
@@ -7903,7 +7964,7 @@ async function runTool(
   }
 
   if (toolName === "topic.delete") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const topicId = readRequiredString(args, "topicId");
     const result = await callRestApi<{ id: string }>(
       "DELETE",
@@ -7958,7 +8019,7 @@ async function runTool(
 
   // --- Automations & events (snake_case arguments on purpose) ---------------
   if (toolName === "automation.create") {
-    const publicationId = readRequiredString(args, "publication_id");
+    const publicationId = readPublicationId(args, options, "publication_id");
     const name = readRequiredString(args, "name");
     const steps = readRequiredJsonObjectArray(args, "steps");
     const connections = readOptionalJsonObjectArray(args, "connections");
@@ -8007,7 +8068,7 @@ async function runTool(
   }
 
   if (toolName === "automation.list") {
-    const publicationId = readRequiredString(args, "publication_id");
+    const publicationId = readPublicationId(args, options, "publication_id");
     const status = asOptionalString(args.status);
     const limit = readOptionalNumber(args, "limit");
     const after = asOptionalString(args.after);
@@ -8039,7 +8100,7 @@ async function runTool(
   }
 
   if (toolName === "automation.get") {
-    const publicationId = readRequiredString(args, "publication_id");
+    const publicationId = readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
 
     const automation = await callAutomationApi<AutomationResponse>(
@@ -8059,7 +8120,7 @@ async function runTool(
   }
 
   if (toolName === "automation.update") {
-    const publicationId = readRequiredString(args, "publication_id");
+    const publicationId = readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
     const name = asOptionalString(args.name);
     const steps = readOptionalJsonObjectArray(args, "steps");
@@ -8109,7 +8170,7 @@ async function runTool(
   }
 
   if (toolName === "automation.validate") {
-    const publicationId = readRequiredString(args, "publication_id");
+    const publicationId = readPublicationId(args, options, "publication_id");
     const steps = readRequiredJsonObjectArray(args, "steps");
     const connections = readOptionalJsonObjectArray(args, "connections");
 
@@ -8128,7 +8189,7 @@ async function runTool(
   }
 
   if (toolName === "automation.enable") {
-    const publicationId = readRequiredString(args, "publication_id");
+    const publicationId = readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
 
     const automation = await callAutomationApi<AutomationResponse>(
@@ -8147,7 +8208,7 @@ async function runTool(
   }
 
   if (toolName === "automation.disable") {
-    const publicationId = readRequiredString(args, "publication_id");
+    const publicationId = readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
     const cancelRuns = readOptionalBoolean(args, "cancel_runs");
 
@@ -8167,7 +8228,7 @@ async function runTool(
   }
 
   if (toolName === "automation.archive") {
-    const publicationId = readRequiredString(args, "publication_id");
+    const publicationId = readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
     const cancelRuns = readOptionalBoolean(args, "cancel_runs");
 
@@ -8187,7 +8248,7 @@ async function runTool(
   }
 
   if (toolName === "automation.delete") {
-    const publicationId = readRequiredString(args, "publication_id");
+    const publicationId = readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
 
     const result = await callAutomationApi<{ id: string; deleted: boolean }>(
@@ -8203,7 +8264,7 @@ async function runTool(
   }
 
   if (toolName === "automation.versions") {
-    const publicationId = readRequiredString(args, "publication_id");
+    const publicationId = readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
     const limit = readOptionalNumber(args, "limit");
     const after = asOptionalString(args.after);
@@ -8235,7 +8296,7 @@ async function runTool(
   }
 
   if (toolName === "automation.version") {
-    const publicationId = readRequiredString(args, "publication_id");
+    const publicationId = readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
     const version = readOptionalNumber(args, "version");
     if (version === undefined) {
@@ -8260,7 +8321,7 @@ async function runTool(
   }
 
   if (toolName === "automation.metrics") {
-    const publicationId = readRequiredString(args, "publication_id");
+    const publicationId = readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
     const version = readOptionalNumber(args, "version");
     const since = asOptionalString(args.since);
@@ -8298,7 +8359,7 @@ async function runTool(
   }
 
   if (toolName === "automation_run.list") {
-    const publicationId = readRequiredString(args, "publication_id");
+    const publicationId = readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
     const status = asOptionalString(args.status);
     const contactId = asOptionalString(args.contact_id);
@@ -8336,7 +8397,7 @@ async function runTool(
   }
 
   if (toolName === "automation_run.get") {
-    const publicationId = readRequiredString(args, "publication_id");
+    const publicationId = readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
     const runId = readRequiredString(args, "run_id");
 
@@ -8363,7 +8424,7 @@ async function runTool(
   }
 
   if (toolName === "automation_run.cancel") {
-    const publicationId = readRequiredString(args, "publication_id");
+    const publicationId = readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
     const runId = readRequiredString(args, "run_id");
 
@@ -8381,7 +8442,7 @@ async function runTool(
   }
 
   if (toolName === "event.send") {
-    const publicationId = readRequiredString(args, "publication_id");
+    const publicationId = readPublicationId(args, options, "publication_id");
     const eventName = readRequiredString(args, "event_name");
     const contactId = asOptionalString(args.contact_id);
     const email = asOptionalString(args.email);
@@ -8427,7 +8488,7 @@ async function runTool(
   }
 
   if (toolName === "event_definition.list") {
-    const publicationId = readRequiredString(args, "publication_id");
+    const publicationId = readPublicationId(args, options, "publication_id");
     const limit = readOptionalNumber(args, "limit");
     const after = asOptionalString(args.after);
 
@@ -8457,7 +8518,7 @@ async function runTool(
   }
 
   if (toolName === "event_definition.get") {
-    const publicationId = readRequiredString(args, "publication_id");
+    const publicationId = readPublicationId(args, options, "publication_id");
     const definitionId = readRequiredString(args, "definition_id");
 
     const definition = await callAutomationApi<Record<string, unknown>>(
@@ -8482,7 +8543,7 @@ async function runTool(
   }
 
   if (toolName === "event_definition.create") {
-    const publicationId = readRequiredString(args, "publication_id");
+    const publicationId = readPublicationId(args, options, "publication_id");
     const eventName = readRequiredString(args, "event_name");
     const description = asOptionalString(args.description);
     // Nothing is stored yet, so null and absent both mean "no schema" here.
@@ -8507,7 +8568,7 @@ async function runTool(
   }
 
   if (toolName === "event_definition.update") {
-    const publicationId = readRequiredString(args, "publication_id");
+    const publicationId = readPublicationId(args, options, "publication_id");
     const definitionId = readRequiredString(args, "definition_id");
     const description = asOptionalString(args.description);
     const schemaJson = readNullableJsonObject(args, "schema_json");
@@ -8534,7 +8595,7 @@ async function runTool(
   }
 
   if (toolName === "event_definition.delete") {
-    const publicationId = readRequiredString(args, "publication_id");
+    const publicationId = readPublicationId(args, options, "publication_id");
     const definitionId = readRequiredString(args, "definition_id");
 
     const result = await callAutomationApi<{ id: string; deleted: boolean }>(
@@ -8560,7 +8621,7 @@ async function runTool(
   // "Insufficient role" back from the tRPC call.
 
   if (toolName === "site.get") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
 
     const site = await callTrpc<SiteSettingsRecord>(
       "publication.siteSettings",
@@ -8588,7 +8649,7 @@ async function runTool(
   }
 
   if (toolName === "site.pages_list") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
 
     const result = await callTrpc<{ pages: SitePageRecord[] }>(
       "publication.sitePages",
@@ -8616,7 +8677,7 @@ async function runTool(
   }
 
   if (toolName === "site.page_get") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const pageId = asOptionalString(args.pageId);
     const slug = asOptionalString(args.slug);
     const kind = asOptionalString(args.kind);
@@ -8671,7 +8732,7 @@ async function runTool(
   }
 
   if (toolName === "site.page_upsert") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const kind = readRequiredString(args, "kind");
     const slug = readRequiredString(args, "slug");
     const title = readRequiredString(args, "title");
@@ -8714,7 +8775,7 @@ async function runTool(
   }
 
   if (toolName === "site.apply_ops") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const pageId = asOptionalString(args.pageId);
     const slug = asOptionalString(args.slug);
     const ops = readRequiredJsonObjectArray(args, "ops");
@@ -8764,7 +8825,7 @@ async function runTool(
   }
 
   if (toolName === "site.section_templates_list") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
 
     const result = await callTrpc<{ templates: SiteTemplateRecord[] }>(
       "publication.siteSectionTemplates",
@@ -8780,7 +8841,7 @@ async function runTool(
   }
 
   if (toolName === "site.footer_templates_list") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const result = await callTrpc<{
       templates: Array<{ id: string; name: string; description: string }>;
     }>("publication.siteFooterTemplates", { publicationId }, options, "query");
@@ -8792,7 +8853,7 @@ async function runTool(
   }
 
   if (toolName === "site.navbar_templates_list") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const result = await callTrpc<{
       templates: Array<{
         id: string;
@@ -8809,7 +8870,7 @@ async function runTool(
   }
 
   if (toolName === "site.design_brief_get") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
 
     const site = await callTrpc<SiteSettingsRecord>(
       "publication.siteSettings",
@@ -8827,7 +8888,7 @@ async function runTool(
   }
 
   if (toolName === "site.design_brief_set") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     // Three-state on purpose: null clears the brief, a string replaces it.
     const designBrief = readNullableString(args, "designBrief");
     if (designBrief === undefined) {
@@ -8851,7 +8912,7 @@ async function runTool(
   }
 
   if (toolName === "site.publish") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
 
     const result = await callTrpc<{
       publishedAt: string;
@@ -8871,7 +8932,7 @@ async function runTool(
   }
 
   if (toolName === "site.discard_draft") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
 
     const result = await callTrpc<{ draftVersion: number; pages: SitePageRecord[] }>(
       "publication.siteDiscardDraft",
@@ -8890,7 +8951,7 @@ async function runTool(
   }
 
   if (toolName === "site.asset_list") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const search = asOptionalString(args.search);
     const requestedLimit = readOptionalNumber(args, "limit");
     const limit = Math.max(1, Math.min(200, Math.trunc(requestedLimit ?? 50)));
@@ -8911,7 +8972,7 @@ async function runTool(
   }
 
   if (toolName === "site.asset_upload") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const contentType = readRequiredString(args, "contentType");
     const dataBase64 = readRequiredString(args, "dataBase64");
     const fileName = asOptionalString(args.fileName);
@@ -8948,7 +9009,7 @@ async function runTool(
   }
 
   if (toolName === "site.asset_delete") {
-    const publicationId = readRequiredString(args, "publicationId");
+    const publicationId = readPublicationId(args, options);
     const assetId = readRequiredString(args, "assetId");
 
     const result = await callTrpc<{ deleted: boolean }>(

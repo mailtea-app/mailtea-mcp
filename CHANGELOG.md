@@ -2,6 +2,37 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
+## 0.14.0 (2026-09-11)
+
+- Fixed: `publicationId` is no longer a required argument on any tool, and
+  `publication_id` is no longer required on the automation and event tools. It
+  now defaults to the publication the connection is already for — the
+  publication named by the OAuth consent grant over the hosted endpoint, the one
+  a publication-scoped API key was minted for, or `MAILTEA_PUBLICATION_ID` over
+  stdio. Through the hosted server this made calls such as `sender.list {}` and
+  `publication.domain_list {}` fail with `Missing required string argument:
+  publicationId`, which an agent could not act on: a consent grant names exactly
+  one publication and the server refuses every other one, so the id the agent
+  was being asked to supply was the only one that could ever have worked, and
+  the tool schema advertised it as required so the agent had no way to learn it
+  could be omitted. Every affected tool's schema now describes the default.
+  Nothing is widened — an explicit `publicationId` still travels as typed and is
+  still refused when it names a publication the credential does not cover, and a
+  call with no argument and nothing to default to still fails with the same
+  message as before.
+- Added: `envPublicationFallback` on the runtime options. Set it to `false` and
+  `MAILTEA_PUBLICATION_ID` in the surrounding process is ignored as a default.
+  The hosted server sets it, because one process there answers for every tenant
+  and a variable set on it would otherwise become the default publication for
+  callers it has nothing to do with — including a team-scoped key, which passes
+  the publication check precisely because it is scoped to none. Defaults to
+  `true`, so stdio and the CLI are unchanged.
+- Changed: `publication.create`'s `publicationId` now says in its schema that it
+  names the publication being created rather than one to act on, so an agent
+  carrying the new defaulting habit does not mistake it for the connected
+  publication. `section.catalog`'s says that omitting it means the shared
+  catalog only, which is a real choice rather than a missing argument.
+
 ## 0.13.0 (2026-09-10)
 
 - Changed: `domain.verify` (and every domain read) now reports
