@@ -2,6 +2,24 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
+## 0.15.0 (2026-09-15)
+
+- Added: `api_key.create` takes `mode` (`live` or `test`). A test key is
+  prefixed `mt_test_` and its sends are validated, recorded and webhook-emitting
+  but never delivered — so an agent can exercise the whole send path without a
+  message reaching an inbox. It is **not** a data sandbox: it reads and writes
+  the real contacts, templates, senders and webhooks. Only delivery is
+  simulated.
+- Added: `email.list` takes `mode` (`live` or `test`). There is no mixed view; a
+  test key reads only test mail and a live key only live mail. A test row is
+  marked `[test]` in the list summary, so a summarized list cannot report a
+  simulated send as a real delivery.
+- Reserved recipients on `test.mailtea.email` force an outcome: `delivered@`,
+  `bounced@`, `complained@`, `delayed@`, `failed@`. The first `to` recipient
+  decides; anything else is delivered.
+- Note: `mode` is never accepted on `email.send` or `email.batch`. The key
+  decides.
+
 ## 0.14.0 (2026-09-11)
 
 - Fixed: `publicationId` is no longer a required argument on any tool, and

@@ -12,7 +12,9 @@ claude mcp add mailtea \
   -- npx -y mailtea-mcp
 ```
 
-Create the token (prefix `mt_pat_`) in **Settings → API keys**, then ask your agent to send an email. It calls `email.send` and the message goes out through Mailtea.
+Create the token in **Settings → API keys**, then ask your agent to send an email. It calls `email.send` and the message goes out through Mailtea.
+
+A live key is prefixed `mt_pat_` or `mt_svc_`. A **test key** is prefixed `mt_test_`: the agent's sends are validated, recorded and emit webhooks, but nothing is delivered. See [Test mode](#test-mode).
 
 The server defaults to the Mailtea cloud API. Self-hosting or running locally? Add `-e MAILTEA_API_BASE_URL=http://localhost:7787` (and optional `-e MAILTEA_PUBLICATION_ID=pub_demo`).
 
@@ -22,7 +24,7 @@ The server defaults to the Mailtea cloud API. Self-hosting or running locally? A
 
 ## Tool families
 
-- `email.*` — `email.send`, `email.batch`, `email.get`, `email.list`, `email.analytics`, `email.reschedule`, `email.cancel`, `email.resend` (transactional, one-shot to specific recipients; `resend` retries a failed/bounced email)
+- `email.*` — `email.send`, `email.batch`, `email.get`, `email.list`, `email.analytics`, `email.reschedule`, `email.cancel`, `email.resend` (transactional, one-shot to specific recipients; `resend` retries a failed/bounced email). `email.list` takes `mode` — `live` or `test`, with no mixed view
 - `email.inbound_*` — received email: `inbound_list`, `inbound_get`, `inbound_list_attachments`, `inbound_get_attachment`, `inbound_reply` (auto-threaded; all but `inbound_list` resolve the publication from the email id, so they take no `publicationId` at all)
 - `auth.*`
 - `issue.*` — newsletter drafts + sends to the whole list, plus `publish_to_web` / `unpublish_from_web`
@@ -34,7 +36,7 @@ The server defaults to the Mailtea cloud API. Self-hosting or running locally? A
 - `segment.*` — saved, filter-based audience segments
 - `tag.*` — tag definitions
 - `webhook.*` — outbound event subscriptions
-- `api_key.*` — manage API keys (requires `settings:write`)
+- `api_key.*` — manage API keys (requires `settings:write`). `api_key.create` takes `mode: "test"` to mint a test key
 - `analytics.*`
 - `section.*`
 - `automation.*` — multi-step contact journeys: `create`, `list`, `get`, `update`, `enable`, `disable`, `archive`, `delete`, `validate`, `metrics`. An automation is a versioned graph of `steps` + `connections`, so an agent can author one as data. `connections` is optional (steps link in array order) and becomes required only when the graph branches; `validate_only: true` on `create`/`update` is a dry run returning the same coded `issues[]` a real failure returns, so an agent can self-correct before committing. These tools take **snake_case** arguments, unlike the older camelCase tools — the graph payload is snake_case throughout and mixing the two inside one payload is a trap
@@ -156,6 +158,37 @@ That verifies the full loop:
 - draft content
 - inspect audience
 - inspect outcomes
+
+## Test mode
+
+A test key (`mt_test_…`) sends nothing. Every message the agent creates is
+validated, recorded and emits webhooks, but is never handed to a provider — so
+an agent can exercise the whole send path, and a CI run can point at production
+Mailtea, without a single message reaching an inbox.
+
+Mint one with `api_key.create` (`{ "name": "CI", "mode": "test" }`), or in
+**Settings → API keys**, and connect the server with it in place of the live
+token.
+
+Reserved recipients on `test.mailtea.email` force the outcome. The first `to`
+recipient decides:
+
+| Recipient | Result |
+| --- | --- |
+| `delivered@test.mailtea.email` | sent, then delivered |
+| `bounced@test.mailtea.email` | sent, then bounced |
+| `complained@test.mailtea.email` | sent, then a spam complaint |
+| `delayed@test.mailtea.email` | sent, delayed, then delivered |
+| `failed@test.mailtea.email` | fails outright, never sent |
+| anything else | sent, then delivered |
+
+`email.list` takes `mode` to read test mail back, and every row it returns
+carries its own mode — a test row is marked `[test]` in the summary. A test key
+reads only test mail and a live key only live mail; there is no mixed view.
+
+A test key is **not** a data sandbox. It reads and writes the real contacts,
+templates, senders and webhooks. Only delivery is simulated. Newsletter sends,
+"send me a copy" and automation enrollment are refused with a test key.
 
 ## When to use MCP instead of direct API calls
 

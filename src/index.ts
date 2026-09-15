@@ -1659,7 +1659,7 @@ const SITE_OP_SCHEMA = {
  * client that asked was told the wrong number; `version.test.ts` now ties the
  * two together.
  */
-export const SERVER_VERSION = "0.14.0";
+export const SERVER_VERSION = "0.15.0";
 
 /**
  * The publication a tool acts on — advertised as OPTIONAL on every tool that
@@ -2995,7 +2995,7 @@ export const MCP_TOOLS = [
   {
     name: "email.get",
     description:
-      "Retrieve a transactional email by id with its delivery status (last_event), the reason it failed if it did (error, failed_at), tracking counters (open_count, click_count), and dropped_recipients — anyone the message did not reach and why. to/cc/bcc are what was ASKED for; a partially-delivered send looks identical to a fully-delivered one unless you read dropped_recipients.",
+      "Retrieve a transactional email by id with its delivery status (last_event), the reason it failed if it did (error, failed_at), tracking counters (open_count, click_count), and dropped_recipients — anyone the message did not reach and why. to/cc/bcc are what was ASKED for; a partially-delivered send looks identical to a fully-delivered one unless you read dropped_recipients. Also returns mode; a test-mode row is marked [test] in the summary and was never delivered.",
     inputSchema: {
       type: "object",
       properties: { id: { type: "string" } },
@@ -3036,7 +3036,7 @@ export const MCP_TOOLS = [
   {
     name: "email.list",
     description:
-      "List transactional emails (most recent first). Filter by status, tags, or a search substring over recipient/sender/subject; paginate with limit/offset. Returns id, status, subject, recipient per email.",
+      "List transactional emails (most recent first). Filter by status, mode (live or test), tags, or a search substring over recipient/sender/subject; paginate with limit/offset. Returns id, status, subject, recipient per email; test-mode rows are marked [test].",
     inputSchema: {
       type: "object",
       properties: {
@@ -3064,7 +3064,13 @@ export const MCP_TOOLS = [
           description:
             "ISO 8601 lower bound on created_at. Clamped to the plan's analytics retention window (30 days on most plans, 90 on Scale/Enterprise); reaching further back returns data from the start of that window, and omitting this returns the window rather than all time."
         },
-        to_date: { type: "string", description: "ISO 8601 upper bound on created_at." }
+        to_date: { type: "string", description: "ISO 8601 upper bound on created_at." },
+        mode: {
+          type: "string",
+          enum: ["live", "test"],
+          description:
+            "Which mail to return: 'live' real mail, or 'test' messages sent with a test key (mt_test_...), which are recorded and emit webhooks but are never delivered. There is no mixed view. A test key reads only test mail and a live key only live mail, so this matters to a session-backed credential; asking for the mode your key is not in is an error, not an empty list."
+        }
       }
     }
   },
@@ -3795,7 +3801,7 @@ export const MCP_TOOLS = [
   {
     name: "api_key.create",
     description:
-      "Create an API key (PAT). Requires the calling token to hold settings:write AND every scope the new key would grant. The token value is returned ONCE — store it securely. 'full_access' grants all scopes; 'sending_access' grants issue read/write/send only.",
+      "Create an API key (PAT). Requires the calling token to hold settings:write AND every scope the new key would grant. The token value is returned ONCE — store it securely. 'full_access' grants all scopes; 'sending_access' grants issue read/write/send only. Pass mode 'test' for a key whose sends are simulated rather than delivered.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3805,7 +3811,13 @@ export const MCP_TOOLS = [
           enum: ["full_access", "sending_access"],
           description: "Defaults to full_access."
         },
-        domain_id: { type: "string", description: "Optional publication scope for sending_access." }
+        domain_id: { type: "string", description: "Optional publication scope for sending_access." },
+        mode: {
+          type: "string",
+          enum: ["live", "test"],
+          description:
+            "Defaults to live. A test key is prefixed mt_test_: its sends are validated, recorded and emit webhooks but are never delivered, and it reads only test mail. It is NOT a data sandbox — it reads and writes the real contacts, templates, senders and webhooks. Only delivery is simulated."
+        }
       },
       required: ["name"]
     }
@@ -7062,8 +7074,13 @@ async function runTool(
     // reason is the whole point of asking, and an agent reading the first line
     // should not have to go digging to find it.
     const failure = email.error ? ` — ${String(email.error)}` : "";
+    // The same marker `email.list` puts on a test row, for the same reason and
+    // more urgently: a retrieve is what an agent calls to confirm one specific
+    // send landed, and that answer is the one most likely to be repeated to a
+    // human as "your email was delivered".
+    const marker = email.mode === "test" ? " [test]" : "";
     return makeToolResult(
-      `Email ${id}: ${String(email.last_event ?? "unknown")}${failure} (opens ${String(
+      `Email ${id}: ${String(email.last_event ?? "unknown")}${marker}${failure} (opens ${String(
         email.open_count ?? 0
       )}, clicks ${String(email.click_count ?? 0)})`,
       { email }
@@ -7112,7 +7129,18 @@ async function runTool(
     const offset = readOptionalNumber(args, "offset");
     if (limit !== undefined) params.set("limit", String(limit));
     if (offset !== undefined) params.set("offset", String(offset));
-    for (const key of ["status", "tag_name", "tag_value", "search", "from_date", "to_date"] as const) {
+    // `mode` belongs here, not only in the inputSchema: a key missing from this
+    // list is accepted by the schema, advertised to agents and then silently
+    // dropped before the request — the filter appears to do nothing.
+    for (const key of [
+      "status",
+      "tag_name",
+      "tag_value",
+      "search",
+      "from_date",
+      "to_date",
+      "mode"
+    ] as const) {
       const value = asOptionalString(args[key]);
       if (value) params.set(key, value);
     }
@@ -7124,10 +7152,13 @@ async function runTool(
       has_more: boolean;
     }>("GET", `/v1/emails${qs ? `?${qs}` : ""}`, undefined, options);
 
-    const lines = result.data.map(
-      (email) =>
-        `${String(email.id)}: ${String(email.last_event)} — ${String(email.subject)} → ${String(email.to)}`
-    );
+    const lines = result.data.map((email) => {
+      // Marked only when it is test mail. A live list is the common case and
+      // stays unlabelled; the label exists so an agent reading a summary cannot
+      // report a simulated send as a real delivery.
+      const marker = email.mode === "test" ? " [test]" : "";
+      return `${String(email.id)}: ${String(email.last_event)}${marker} — ${String(email.subject)} → ${String(email.to)}`;
+    });
     return makeToolResult(
       result.data.length > 0
         ? `${result.data.length} of ${result.total} email(s):\n${lines.join("\n")}`
@@ -7980,18 +8011,20 @@ async function runTool(
     const name = readRequiredString(args, "name");
     const permission = asOptionalString(args.permission);
     const domainId = asOptionalString(args.domain_id);
-    const result = await callRestApi<{ id: string; token: string }>(
+    const mode = asOptionalString(args.mode);
+    const result = await callRestApi<{ id: string; token: string; mode: string }>(
       "POST",
       "/v1/api-keys",
       {
         name,
         ...(permission ? { permission } : {}),
-        ...(domainId ? { domain_id: domainId } : {})
+        ...(domainId ? { domain_id: domainId } : {}),
+        ...(mode ? { mode } : {})
       },
       options
     );
     return makeToolResult(
-      `API key ${result.id} created. Store this token now — it won't be shown again: ${result.token}`,
+      `API key ${result.id} created in ${result.mode} mode. Store this token now — it won't be shown again: ${result.token}`,
       result
     );
   }
