@@ -2978,7 +2978,7 @@ export const MCP_TOOLS = [
   {
     name: "email.batch",
     description:
-      "Send up to 100 transactional emails in one request. Each item is shaped like email.send but WITHOUT attachments or scheduled_at. Returns the ids in request order.",
+      "Send up to 100 transactional emails in one request. Each item is shaped like email.send but WITHOUT attachments or scheduled_at. Returns the ids in request order. The send allowance is measured against the WHOLE batch, not per message: if the batch does not fit in what is left, the request is refused with 403 and NOTHING is created — the error names how many emails the batch needed and how many of the limit are already used. Re-sending the same batch fails identically, so split it into smaller batches or wait for the limit to reset.",
     inputSchema: {
       type: "object",
       properties: {

@@ -2,6 +2,18 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
+## 0.16.0 (2026-09-16)
+
+- Changed: `email.batch` now advertises how the send allowance is measured. It
+  is checked against the **whole batch**, not per message — a batch that does
+  not fit in what is left is refused with `403` and **nothing is created**, and
+  the error names how many emails the batch needed and how many of the limit are
+  already used. Re-sending the same batch fails identically, so split it or wait
+  for the limit to reset rather than retrying. The server behaviour changed on
+  2026-09-16: before that the check asked for a single message regardless of
+  batch size, so a batch could exceed the allowance. The tool schema says so now
+  because an agent can only act on what the schema tells it.
+
 ## 0.15.0 (2026-09-15)
 
 - Added: `api_key.create` takes `mode` (`live` or `test`). A test key is
