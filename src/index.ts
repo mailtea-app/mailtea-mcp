@@ -1659,7 +1659,7 @@ const SITE_OP_SCHEMA = {
  * client that asked was told the wrong number; `version.test.ts` now ties the
  * two together.
  */
-export const SERVER_VERSION = "0.16.0";
+export const SERVER_VERSION = "0.17.0";
 
 /**
  * The publication a tool acts on — advertised as OPTIONAL on every tool that
@@ -1928,7 +1928,7 @@ export const MCP_TOOLS = [
   {
     name: "sender.create",
     description:
-      "Create a named sender. The email domain must be a verified, DKIM-verified sending domain of the publication.",
+      "Create a named sender. The email domain must be a verified, DKIM-verified sending domain of the publication. The built-in '{slug}.mailtea.email' host is REFUSED here: it can only ever email verified members of the team, so a sender on it would be refused on every real send. Verify a domain first (domain.create).",
     inputSchema: {
       type: "object",
       properties: {
@@ -2904,14 +2904,14 @@ export const MCP_TOOLS = [
   {
     name: "email.send",
     description:
-      "Send a transactional email to one or more specific recipients. Provide inline content (html and/or text) OR a template reference — not both. Unlike issue.send_now (which sends a newsletter to the WHOLE publication list), this delivers a one-shot email to the exact addresses in 'to'. Set scheduled_at to send later. Returns the new email's id.",
+      "Send a transactional email to one or more specific recipients. Provide inline content (html and/or text) OR a template reference — not both. Unlike issue.send_now (which sends a newsletter to the WHOLE publication list), this delivers a one-shot email to the exact addresses in 'to'. Set scheduled_at to send later. Returns the new email's id. ON MAILTEA CLOUD, UNTIL THE TEAM VERIFIES A SENDING DOMAIN OF ITS OWN, this only delivers to verified members of that team (a self-hosted install is exempt) — whatever 'from' you use. Any other recipient in to/cc/bcc is refused with 403 and reason 'system_domain_recipient_restricted'. Verifying one domain (domain.create, then domain.verify) lifts it for the whole team; the built-in '{slug}.mailtea.email' address stays team-only even then.",
     inputSchema: {
       type: "object",
       properties: {
         from: {
           type: "string",
           description:
-            "Sender, e.g. 'Acme <hello@acme.com>'. Must use a verified domain. Provide this OR sender_id, not both."
+            "Sender, e.g. 'Acme <hello@acme.com>'. Must be on a domain the TEAM has verified — any publication of it counts, and a domain nobody on the team verified (a Mailtea address, or another customer's) is refused with 422 and reason 'DOMAIN_NOT_VERIFIED'. Note also the recipient restriction on email.send: a team with no verified domain, and the built-in '{slug}.mailtea.email' address at any time, can only reach verified members of the team. Provide this OR sender_id, not both."
         },
         sender_id: {
           type: "string",
@@ -2978,14 +2978,14 @@ export const MCP_TOOLS = [
   {
     name: "email.batch",
     description:
-      "Send up to 100 transactional emails in one request. Each item is shaped like email.send but WITHOUT attachments or scheduled_at. Returns the ids in request order. The send allowance is measured against the WHOLE batch, not per message: if the batch does not fit in what is left, the request is refused with 403 and NOTHING is created — the error names how many emails the batch needed and how many of the limit are already used. Re-sending the same batch fails identically, so split it into smaller batches or wait for the limit to reset.",
+      "Send up to 100 transactional emails in one request. Each item is shaped like email.send but WITHOUT attachments or scheduled_at. Returns the ids in request order. The send allowance is measured against the WHOLE batch, not per message: if the batch does not fit in what is left, the request is refused with 403 and NOTHING is created — the error names how many emails the batch needed and how many of the limit are already used. Re-sending the same batch fails identically, so split it into smaller batches or wait for the limit to reset. The recipient restriction applies here too: until the team verifies a sending domain, one item addressing anyone but a verified team member refuses the WHOLE batch with 403 and reason 'system_domain_recipient_restricted' — as does any item sent from the built-in '{slug}.mailtea.email' address.",
     inputSchema: {
       type: "object",
       properties: {
         emails: {
           type: "array",
           description:
-            "1-100 email objects: { from, to, subject, html?|text?|template?, cc?, bcc?, reply_to?, tracking_open?, tracking_click?, tags?, headers? }. Set tracking_open/tracking_click false to send without an open pixel or rewritten links; a domain with tracking switched off cannot be overridden here.",
+            "1-100 email objects: { from, to, subject, html?|text?|template?, cc?, bcc?, reply_to?, tracking_open?, tracking_click?, tags?, headers? }. Every item's `from` must be on a domain the team has verified; one that is not refuses the WHOLE batch with 422 and creates nothing. Set tracking_open/tracking_click false to send without an open pixel or rewritten links; a domain with tracking switched off cannot be overridden here.",
           items: { type: "object" }
         }
       },
@@ -3142,7 +3142,7 @@ export const MCP_TOOLS = [
   {
     name: "email.inbound_reply",
     description:
-      "Reply to an inbound email. The reply threads automatically — In-Reply-To, References, and the To (reply target) are all derived by the server from the original, so they are NOT inputs. Provide html and/or text. Omit `from` to send from the verified domain the mail was delivered to. Tenancy is resolved from the email id (no publicationId). Returns the resulting transactional email id (txemail_) with its status.",
+      "Reply to an inbound email. On Mailtea Cloud, a team with no verified sending domain may reply to THE PERSON WHO WROTE (the original's From) or to its own verified members — so answering a customer works — but cc/bcc get no such allowance, and an original whose Reply-To points elsewhere is refused rather than sent to either address (403, reason/code 'system_domain_recipient_restricted'). Verify a domain to lift all of it. The reply threads automatically — In-Reply-To, References, and the To (reply target) are all derived by the server from the original, so they are NOT inputs. Provide html and/or text. Omit `from` to send from the verified domain the mail was delivered to. Tenancy is resolved from the email id (no publicationId). Returns the resulting transactional email id (txemail_) with its status.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3169,7 +3169,7 @@ export const MCP_TOOLS = [
   {
     name: "issue.send_test",
     description:
-      "Send a TEST copy of a newsletter draft to specific recipients (yourself/teammates) to check it before subscribers see it. Renders the issue exactly as a subscriber would receive it and delivers it as a one-shot email with a '[TEST]' subject prefix. This does NOT send to the publication's audience — use issue.send_now for the real send.",
+      "Send a TEST copy of a newsletter draft to specific recipients (yourself/teammates) to check it before subscribers see it. Renders the issue exactly as a subscriber would receive it and delivers it as a one-shot email with a '[TEST]' subject prefix. This does NOT send to the publication's audience — use issue.send_now for the real send. Until the team verifies a sending domain of its own — and always with a built-in '{slug}.mailtea.email' from — every recipient must be a verified member of the team, or the send is refused with 403 and reason 'system_domain_recipient_restricted'.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3181,7 +3181,8 @@ export const MCP_TOOLS = [
         },
         from: {
           type: "string",
-          description: "Sender, e.g. 'Acme <hello@acme.com>'. Must use a verified domain."
+          description:
+            "Sender, e.g. 'Acme <hello@acme.com>'. Must use a verified domain; the built-in '{slug}.mailtea.email' address can only reach verified members of the team."
         }
       },
       required: ["issueId", "recipients", "from"]

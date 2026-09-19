@@ -2,6 +2,37 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
+## 0.17.0 (2026-09-19)
+
+- Changed: `email.send`, `email.batch`, `issue.send_test` and `email.reply` now
+  advertise that a team which has verified no sending domain of its own can only
+  reach verified members of that team — whatever `from` is used. Any other
+  recipient in `to`, `cc` or `bcc` refuses the whole send, and for `email.batch`
+  the whole batch, with `403` and
+  `reason: "system_domain_recipient_restricted"`. Verifying one domain lifts it
+  for the whole team; the built-in `{slug}.mailtea.email` address stays
+  team-only even afterwards. The schemas say so because an agent can only
+  anticipate what the schema tells it; otherwise this arrives as an unexplained
+  403 mid-task.
+- Changed: `email.reply` describes the one allowance the recipient rule makes —
+  a team with no verified domain may still reply to the person who wrote (the
+  original's `From`), though `cc`/`bcc` get no such allowance and an original
+  whose `Reply-To` points elsewhere is refused.
+- `POST /v1/emails` and `/v1/emails/batch` now send the same string in `code` as
+  in `reason` on every refusal. No MCP change was needed for that — the server
+  relays the API body — but it is recorded because it is a new field an agent
+  can branch on.
+- Both rules the descriptions now state are MAILTEA CLOUD only; a self-hosted
+  install sends through its own provider on its own domains and is exempt.
+- Changed: `email.send` and `email.batch` say that `from` must be on a domain
+  the TEAM has verified, and that an unverified one is refused with `422` and
+  `reason: "DOMAIN_NOT_VERIFIED"`. The check now runs on every key, including a
+  team-scoped one that names no publication — an agent that used to get a `202`
+  for such a send now gets a `422`, and the schema says why.
+- Changed: `sender.create` now says the built-in `{slug}.mailtea.email` host is
+  refused outright. It used to be accepted and then behave like a broken sender,
+  because the send gate passes it while every real send through it is refused.
+
 ## 0.16.0 (2026-09-16)
 
 - Changed: `email.batch` now advertises how the send allowance is measured. It
