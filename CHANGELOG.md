@@ -2,6 +2,191 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
+## Unreleased
+
+- Added: `issue.create_draft` and `issue.update_draft` take a post's `name`,
+  `from` and `replyTo`. `title` is the subject subscribers see; `name` is only
+  the post's internal name in Mailtea Studio and never changes the subject.
+  `from` must be on one of the publication's verified sending domains and
+  `replyTo` must be a valid address: the tools ask the server to check both
+  when they write, so a bad value is refused with the reason instead of being
+  swapped for the default sender at send time. A From on the built-in
+  `*.mailtea.email` address is kept for test emails, but the post itself sends
+  from the publication's default sender. `""` clears a field.
+- Changed: `issue.update_draft` no longer requires `title`. Only the fields you
+  pass change, and an update that leaves out the content keeps the body (the
+  API used to empty it).
+
+Fixes from the 2026-09-24 user-testing run, where an agent drove every tool
+through the default Studio key.
+
+- Fixed: a team-scoped personal API key (the default key Studio creates) now
+  works with every tool that takes `publicationId` / `publication_id`. Left
+  out, the id defaults to the one publication the key's owner belongs to in
+  the key's own team, when there is exactly one. When there are several, the
+  error still starts `Missing required string argument: publicationId.` and
+  now lists the ids and names to pass. A service key, or a key whose owner is
+  no longer in its team, gets no default. Over stdio the runtime asks
+  `auth.me` with the caller's own token and reuses a resolved id for 60
+  seconds per token (never an error); a publication-scoped key is its own
+  default without `MAILTEA_PUBLICATION_ID`. The hosted server decides this
+  itself and makes no extra request. An explicit id is still sent as typed and
+  checked by the server.
+- Added: `McpRuntimeOptions.reachablePublications`, for a host that has
+  already resolved the caller's credential: the runtime then never asks
+  `auth.me` about the caller.
+- Changed: an argument a tool does not declare is no longer silently dropped.
+  The call still runs (nothing that worked before is refused), and the result
+  adds a second text item, `Warning: Ignored unknown argument: ...`, listing
+  what the tool accepts, with a suggestion for a near miss such as
+  `publication_id` on a camelCase tool. A failed call names them in its error.
+- Fixed: REST failures now show the API's `details` (the reason behind "Spec
+  rendering failed", or the fields behind "Validation failed") and its `code`,
+  `reason` and `steps`, in the message and as JSON-RPC `error.data`. Tool
+  descriptions that tell an agent to branch on a code (for example
+  `automation.enable` with `no_verified_sender`) can now be followed.
+- Fixed: `issue.apply_ops` `arrange` deletes accept `{path, expectType}`, like
+  every other address, and a stale one is refused as `stale_address`. If any
+  address in an `arrange` op is stale the whole op is refused, so a stale path
+  can no longer delete the wrong block while the op reports success. The op's
+  description no longer claims addresses resolve against the document as it
+  was when the batch started; they resolve when the op runs.
+- Fixed: a `contentSpec` / `template.render` spec whose elements leave out
+  `props` renders, as the schema always said it could. It used to fail with a
+  bare "Spec rendering failed".
+- Changed: `ai.generate_draft` says what it is: a placeholder scaffold. No AI
+  model runs and nothing is saved; the result is marked `scaffold: true` and
+  `saved: false`.
+- Changed: the `newsletter.draft_from_brief` prompt takes `brief` (required),
+  `audience`, `tone` and `call_to_action`, and `newsletter.subject_line_pack`
+  takes `topic` (required), `count` and `audience`. Both embed what they are
+  given. Called with no arguments they still answer, asking for the brief.
+- Fixed: `issue.send_and_wait` returns the issue's final `status`, `sentAt` and
+  `updatedAt` from the last progress read instead of the `sending` row it
+  started from, and no longer echoes the whole `contentJson`.
+- Fixed: `event.send` schema errors no longer print a literal `undefined`
+  before each issue code.
+- Changed: `domain.list` takes any region the list reports as its `region`
+  filter, including a deployment's default region outside the catalog (for
+  example `us-east-1` locally). `domain.create` says that an omitted `purpose`
+  makes a `site` domain, which cannot send.
+- Changed: `contact.import_csv` says that only the email column is read, and
+  its result names any other column in `ignoredColumns` (at most 20 names;
+  `ignoredColumnCount` is the full count).
+- Changed: `site.asset_upload` no longer says SVG is refused (it is accepted
+  and served under a sandbox policy) and warns that Gmail and Outlook do not
+  show SVG in email.
+- Changed: `automation.enable` names `CUSTOM_DOMAIN_REQUIRED` and the new
+  `BUILT_IN_SENDER` among its refusal reasons, and `email.send` advertises
+  `tracking_open` and `tracking_click`, which it already forwarded.
+- Fixed (server): an automation whose step sends from the built-in
+  `{slug}.mailtea.email` address is now refused at Start with `code:
+  "no_verified_sender"`, `reason: "BUILT_IN_SENDER"` and the step keys, when
+  the team has a verified domain of its own. It used to start and then have
+  every send to a contact refused at runtime. Mailtea Cloud only.
+- Changed: `email.lint` now warns about `color-mix()`, which Outlook desktop
+  drops (a divider coloured with it disappears). Mailtea's own renderer no
+  longer emits it, so this flags HTML written by hand or by an agent. The tool
+  description says so.
+- Changed: `email.send` with a `template` may leave out `subject`, `from` and
+  `sender_id`. The input schema now requires only `to`, and says so: the
+  template's published subject is used, and its sender is the publication's default
+  sender, then the template's own From. Without a template the tool still
+  refuses a missing `subject`, and a missing or doubled sender, before any
+  request.
+- Behaviour (API): a template's `{{variables}}` in the subject are now filled
+  with the same values and fallbacks as the body, on `email.send` and on
+  automation emails. An agent that sent `"Hi {{first_name}}"` used to deliver
+  the braces.
+- Breaking: `issue.create_draft` seeding from `templateId` now HTML-escapes
+  the `variables` you pass, the same as every other send. HTML passed in a
+  `{{key}}` value now arrives as visible text, and a value you escaped
+  yourself arrives double-escaped. Put `{{{key}}}` in the template where a
+  value is meant to be raw HTML. Variables are now filled in both the
+  `{{key}}` and Visual Email Designer `{key}` forms. A declared variable you
+  do not pass stays in the post with its `fallback_value`, so the broadcast
+  gives each recipient their own value or that fallback, and undeclared tokens
+  like `{{contact.first_name}}` are left for the broadcast too. The post keeps
+  the template's published page style, is wrapped in that page, and has its
+  show-if blocks decided per recipient when it is sent. Before, only the
+  variables you passed were replaced, raw, and only in `{{key}}` form. It uses
+  the template's published version; Mailtea Studio's "Use template" starts
+  from the latest saved design instead.
+- Changed: `template.update` and `template.restore_version` no longer move a
+  published template back to draft. The template keeps its published status,
+  and automations, issues and the API keep sending its published version until
+  `template.publish` is called again. The template's `from` and `reply_to` are
+  part of the published version too, so a new sender or reply-to address
+  reaches sends only after the next publish. `template.unpublish` is now the
+  only way to stop a published template sending, short of deleting it, and it
+  drops the stored published version so the next publish starts from the
+  current content.
+- Added: `has_unpublished_versions` on every returned template. True only when
+  the template is published and its saved content (From, Reply-To and the style profile included)
+  differs from the published version.
+- Added: `template.versions` reports `is_published` for the entry that is
+  sending now and marks it "(published)" in its summary, next to "(current)"
+  for the entry that matches the working copy. Its description no longer says
+  `is_current` is what the template is serving.
+- Changed: `template.update`'s summary line says "Saved, not published yet"
+  when the edit is not live, so an agent that reads only that line still
+  learns it has to call `template.publish`.
+- Changed: the `template.create`, `template.get`, `template.update`,
+  `template.publish` and `template.restore_version` descriptions now say that
+  sends read the published version (From, Reply-To and the style profile included), that
+  `template.get` returns the working copy, and that a restore no longer
+  returns a template to draft.
+- Changed: the `unpublished` field on the update and restore replies is kept
+  for compatibility and is now always `false`. Check
+  `has_unpublished_versions` (or the reply's `message`) instead.
+- Changed (API behavior): a template variable's `fallback_value` can no longer
+  contain `{` or `}`. Creating a template with one, or changing a fallback
+  to one on update, is a 400 ("Fallbacks can't contain { or }."). A value
+  the template already stores is accepted unchanged, so a template saved
+  before the rule keeps saving. Inline chip fallbacks such as
+  `{first_name|Mom & Pop}` now render as written instead of double-escaped.
+- Changed: the `mailtea://automations/step-types` catalog lists the new
+  `event_field_without_event_trigger` code, says the trigger needs a step on
+  its next branch, and adds `step_refs` and `event_refs` to its condition
+  section (also served by `mailtea://automations/condition-fields`): a
+  `steps.<key>` reference must name a step in the automation, and
+  `event.properties.*` needs an app event trigger. Its notes and the
+  `automation.update` and `automation.enable` descriptions explain the
+  live-edit rules below.
+- Changed (API behavior): saving an active automation is refused only when the
+  edit adds an error the live version does not already have. The 422
+  `active_graph_invalid` reply's `issues` lists just those new problems.
+  Before, any error refused the save, even one the live version already had.
+  Starting refuses every error as before, except an `unknown_step_ref` at a
+  `config.*` path or a trigger `missing_branch` that the version the
+  automation last ran on already had, so pausing and starting an unchanged
+  automation keeps working. Issues the last live version already had come back
+  with `pre_existing: true`.
+- Added (API behavior): issue objects carry `field`, what a rule reads (the
+  rule's `field`, or the path in a `{"var": ...}` value, e.g.
+  `steps.welcome.opened`) when the issue is about one.
+- Changed (API behavior): two issues are the same problem when their code and
+  step match, and their `field` or, when there is none, their `path`. Moving
+  a rule, by removing a rule beside it or putting it in a group, no longer
+  makes a problem the live version already had look new. An error is
+  `pre_existing` only if the live version had an error there, not a warning.
+- Changed (API behavior): `validate_only` on an active automation answers the
+  way the save would. A trigger change is a 422 `trigger_locked_while_active`,
+  a change that adds a problem is a 422 `active_graph_invalid` listing only
+  the new problems, and otherwise issues come back with `pre_existing` marked
+  against the version live now. Before, it returned every issue unmarked.
+- Changed (API behavior): changing the trigger (its type or key) of an active
+  automation is now refused with 422 `trigger_locked_while_active`. Pause it
+  first; draft and paused automations can still change their trigger. Before,
+  the change was accepted.
+- Added (API behavior): new validation rules. A trigger with nothing after it
+  is a `missing_branch` error at `branches.next`. A rule or `{"var": ...}`
+  value that reads `steps.<key>.*` for a step that isn't in the automation is
+  an `unknown_step_ref` error at that `config.*` path, or a warning when the
+  `{"var": ...}` has a `default`. A rule or value that reads
+  `event.properties.*` when the automation does not start from an app event is
+  the new warning `event_field_without_event_trigger`.
+
 ## 0.17.0 (2026-09-19)
 
 - Changed: `email.send`, `email.batch`, `issue.send_test` and `email.reply` now

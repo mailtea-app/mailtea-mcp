@@ -56,6 +56,23 @@ export type McpRuntimeOptions = {
    * Defaults to true, so every existing embedder keeps the behaviour it has.
    */
   envPublicationFallback?: boolean;
+  /**
+   * Set by a host that has already resolved the caller's credential, and read
+   * only when a tool call names no publication and `publicationId` is empty.
+   *
+   * - Omitted (stdio, the CLI): the runtime asks `auth.me` with the caller's
+   *   token, once per token per minute.
+   * - An array (the hosted endpoint, for a team-scoped personal key): the
+   *   publications the error may list so the agent can pick one. No request
+   *   is made; the host already chose the default when there was exactly one.
+   * - null: the host found nothing it may offer (a service key, or a key whose
+   *   person no longer belongs to the key's team). The error just says to pass
+   *   the id.
+   *
+   * A host answering for many tenants sets this so the runtime never calls
+   * back into the API about a caller through its own base URL.
+   */
+  reachablePublications?: ReadonlyArray<{ id: string; name: string }> | null;
   fetchImpl?: typeof fetch;
 };
 
@@ -188,6 +205,10 @@ type ContactImportCsvResult = {
   invalidSamples: string[];
   /** Enrollments the import created. 0 unless `enrollInAutomations` was true. */
   enrolledAutomations?: number;
+  /** Header names of columns the import did not read, at most 20. Absent on older servers. */
+  ignoredColumns?: string[];
+  /** How many columns were ignored in all, when there were more than it names. */
+  ignoredColumnCount?: number;
 };
 
 type ReferralMilestoneRecord = {
@@ -791,7 +812,7 @@ const AUTOMATION_CONNECTIONS_SCHEMA = {
 const AUTOMATION_VALIDATE_ONLY_SCHEMA = {
   type: "boolean",
   description:
-    "Dry run (default false). Writes nothing and returns the SAME structured issues[] a real failure returns, so you can self-correct before committing.",
+    "Dry run (default false). Writes nothing and answers the way the real request would, with the same structured issues[], so you can self-correct before committing. On an ACTIVE automation that includes the 422 trigger_locked_while_active and 422 active_graph_invalid refusals.",
   default: false
 } as const;
 
@@ -858,7 +879,8 @@ const AUTOMATION_STEP_TYPE_CATALOG = {
       config: { required: ["trigger_type"], optional: ["trigger_key", "filter"] },
       branches: ["next"],
       side_effecting: false,
-      description: "Entry point. Exactly one per graph, and nothing may connect into it."
+      description:
+        "Entry point. Exactly one per graph, and nothing may connect into it. It must lead to at least one step on its next branch: a trigger with nothing after it is a missing_branch error (path branches.next) and blocks Start."
     },
     {
       type: "delay",
@@ -992,7 +1014,9 @@ const AUTOMATION_STEP_TYPE_CATALOG = {
     ],
     open_namespaces: ["contact.properties.*", "event.properties.*", "steps.<step_key>.*"],
     max_depth: 10,
-    value_refs: `Rule values may be {"var": "<path>"} for field-to-field comparison`
+    value_refs: `Rule values may be {"var": "<path>"} for field-to-field comparison`,
+    step_refs: `steps.<step_key>.* (in a rule field or a {"var": ...} value) must name a step that is in this automation. A missing one is unknown_step_ref, an error that blocks Start; a {"var": ..., "default": ...} with a default is only a warning, because it always renders the default.`,
+    event_refs: `event.properties.* holds the payload of your app's event. When the trigger is not "event", reading it (in a condition rule or a {"var": ...} value) is the warning event_field_without_event_trigger: it resolves to nothing. A wait_for_event filter is exempt, because there event is the awaited event.`
   },
   validation_codes: [
     "invalid_graph",
@@ -1034,6 +1058,7 @@ const AUTOMATION_STEP_TYPE_CATALOG = {
     "empty_rule_value_set",
     "unknown_condition_field",
     "unknown_variable_path",
+    "event_field_without_event_trigger",
     "connections_required_for_branching",
     "no_send_email_step",
     "template_not_found",
@@ -1051,10 +1076,12 @@ const AUTOMATION_STEP_TYPE_CATALOG = {
   ],
   notes: [
     `connections is optional: omit it and the server links steps in array order with branch "next". A graph containing a condition or wait_for_event step is REJECTED with connections_required_for_branching, so branching graphs must pass connections explicitly.`,
-    "automation.create and automation.update accept validate_only: true — a dry run that writes nothing and returns the same issues[] a real failure returns. automation.validate does the same for a graph with no automation in existence yet.",
-    "Failures return coded issues[] ({code, severity, step_key?, path?, message}), not zod paths. Read the codes, fix the graph, retry.",
-    "Saving is never blocked for draft/paused/archived automations — issues ride along informationally. A graph update to an ACTIVE automation with errors is refused; pause, save, then start again.",
-    "Each step's outputs are addressable from later conditions as steps.<step_key>.*; the trigger's event payload is steps.<trigger_step_key>.event.* — the correlation namespace for wait_for_event and event triggers.",
+    "automation.create and automation.update accept validate_only: true: a dry run that writes nothing and answers the way the real request would. On an ACTIVE automation that includes its refusals (422 trigger_locked_while_active, or 422 active_graph_invalid listing only the problems the change adds); when neither applies, issues[] come back with pre_existing marked against the version live now. automation.validate checks a graph with no automation in existence yet.",
+    "Failures return coded issues[] ({code, severity, step_key?, path?, field?, message}), not zod paths. field is what a rule reads (e.g. steps.welcome.opened) when the issue is about one. Read the codes, fix the graph, retry.",
+    "Saving is never blocked for draft/paused/archived automations: issues ride along informationally. A graph update to an ACTIVE automation is refused (422 active_graph_invalid) only when it ADDS an error the live version does not already have; issues[] then lists just those new problems. Fix them, or pause, save, then start again.",
+    "Changing the trigger (its trigger_type or trigger_key) of an ACTIVE automation is refused with 422 trigger_locked_while_active. Pause it first; contacts already on their way keep going. Draft and paused automations can change their trigger.",
+    "Issues may carry pre_existing: true, meaning the version this automation last ran on already had that problem (same code and step_key, and the same field, or path when there is no field; an error counts only if that version had an error there). Moving a rule, by removing a sibling or grouping it, does not make its problem new. Start refuses every error EXCEPT a pre_existing unknown_step_ref at a config.* path or a pre_existing missing_branch on the trigger (branches.next), so pausing and starting an unchanged automation keeps working. A never-started draft is blocked by those too.",
+    "Each step's outputs are addressable from later conditions as steps.<step_key>.*, where <step_key> must be a step in this automation (else unknown_step_ref). The trigger's event payload is steps.<trigger_step_key>.event.*, which is the correlation namespace for wait_for_event and event triggers. The trigger itself needs a next step (else missing_branch).",
     "http_request sends Mailtea-Automation-Run, Mailtea-Automation-Step and Mailtea-Automation-Attempt headers. Delivery is AT-LEAST-ONCE; the (run, step) pair is stable across attempts and is the receiver's dedupe key.",
     "There is deliberately no test tool: a test run sends real, billed email. Test runs are excluded from every metric.",
     "Metrics are keyed by step_key, so renaming a step key orphans that step's history.",
@@ -1296,7 +1323,7 @@ const EMAIL_OP_SCHEMA = {
         edits: {
           type: "array",
           description:
-            "Copy edits, applied in order against the document as it was when the batch started.",
+            "Copy edits, applied in order. Paths are read against the document as it stands when this op runs, after any earlier op in the batch.",
           items: {
             type: "object",
             properties: {
@@ -1350,7 +1377,7 @@ const EMAIL_OP_SCHEMA = {
     {
       type: "object",
       description:
-        "arrange — reorder and delete blocks. Every address resolves against the document as it stood when the batch started; moves run first, then deletes.",
+        "arrange: reorder and delete blocks. Every address in this op resolves against the document as it stands when this op runs, so an earlier op in the same batch that inserted, moved or deleted blocks has already shifted the paths you read. Moves run first, then deletes. Pass expectType on every move and delete: if any address in the op turns out stale, the WHOLE op is refused as stale_address and nothing moves or is deleted.",
       properties: {
         op: { type: "string", enum: ["arrange"] },
         moves: {
@@ -1368,8 +1395,24 @@ const EMAIL_OP_SCHEMA = {
         },
         deletes: {
           type: "array",
-          description: "Paths to remove, each with everything inside it. Applied after every move.",
-          items: { type: "string" }
+          description:
+            "Nodes to remove, each with everything inside it. Applied after every move. Each item is a path, or {path, expectType}. Prefer the object form: a delete whose path now holds a different node type is refused as stale_address instead of removing the wrong block.",
+          items: {
+            anyOf: [
+              { type: "string", description: "Path of the node to delete." },
+              {
+                type: "object",
+                properties: {
+                  path: { type: "string", description: "Path of the node to delete." },
+                  expectType: {
+                    type: "string",
+                    description: "The node type you believe is at `path`, copied from the outline."
+                  }
+                },
+                required: ["path"]
+              }
+            ]
+          }
         }
       },
       required: ["op"]
@@ -1680,7 +1723,32 @@ export const SERVER_VERSION = "0.17.0";
 const PUBLICATION_ID_SCHEMA = {
   type: "string",
   description:
-    "Publication to act on. Optional: defaults to the publication this connection is authorized for (the OAuth grant's publication, a publication-scoped API key, or MAILTEA_PUBLICATION_ID). Pass it only when the credential reaches more than one publication, or to be explicit."
+    "Publication to act on. Optional: defaults to the publication this connection is authorized for (the OAuth grant's publication, a publication-scoped API key, MAILTEA_PUBLICATION_ID, or, for a team-scoped personal API key, the only publication its owner belongs to in that team). Service keys take no such default. Pass it when the key reaches more than one publication; the error then lists the ids it can take."
+} as const;
+
+/**
+ * A post's internal name and sender headers (API migration 0127), shared by
+ * issue.create_draft and issue.update_draft. The server checks `from` and
+ * `replyTo` when the tool writes them (`strictHeaders`), the same checks
+ * POST/PATCH /v1/posts make, so a bad value is refused now rather than
+ * quietly replaced when the post is sent.
+ */
+const POST_HEADER_PROPERTIES = {
+  name: {
+    type: "string",
+    description:
+      "The post's internal name in Mailtea Studio. Kept apart from the subject: renaming never changes what subscribers see. Omit to leave it; \"\" clears it so the post is listed under its subject."
+  },
+  from: {
+    type: "string",
+    description:
+      "The From for this post, as an email or `Name <email>`. It must be on one of the publication's verified sending domains, or the call is refused with the reason. A From on the built-in *.mailtea.email address is kept for test emails, but the post itself sends from the publication's default sender. Omit to leave it; \"\" clears it so the named sender or publication default decides."
+  },
+  replyTo: {
+    type: "string",
+    description:
+      "The Reply-To for this post: a valid email address, on any domain. It replaces the sender's Reply-To. Omit to leave it; \"\" clears it."
+  }
 } as const;
 
 export const MCP_TOOLS = [
@@ -1694,15 +1762,17 @@ export const MCP_TOOLS = [
   },
   {
     name: "issue.create_draft",
-    description: "Create a marketing email draft. Set kind to 'newsletter' (default) for recurring content that can publish to the public site, or 'broadcast' for a one-time email-only send (promotion, launch, announcement). Provide content one of three ways: templateId (seed from a published server template — use template.list/template.get to find one — with {{variables}} substituted), contentHtml (raw HTML), or contentSpec (json-render spec). Spec is recommended for AI agents — use components: Html, Head, Body, Container, Section, Row, Column, Heading, Text, Link, Button, Image, Hr, Preview, Markdown, MailteaHeader, MailteaFooter, MailteaSpacer, MailteaContentBlock.",
+    // name/from/replyTo: see POST_HEADER_PROPERTIES.
+    description: "Create a marketing email draft. Set kind to 'newsletter' (default) for recurring content that can publish to the public site, or 'broadcast' for a one-time email-only send (promotion, launch, announcement). Provide content one of three ways: templateId (seed from a published server template's PUBLISHED version; use template.list/template.get to find one, and template.publish first if it has unpublished changes), contentHtml (raw HTML), or contentSpec (json-render spec). Spec is recommended for AI agents; use components: Html, Head, Body, Container, Section, Row, Column, Heading, Text, Link, Button, Image, Hr, Preview, Markdown, MailteaHeader, MailteaFooter, MailteaSpacer, MailteaContentBlock. Seeding from a template fills in the variables you pass (both {{key}} and Visual Email Designer {key} forms) and leaves everything else for the broadcast to fill per recipient: a declared variable you do not pass keeps its fallback_value for recipients with no value, and undeclared tokens like {{contact.first_name}} are left as they are. The draft keeps the template's published page style, is wrapped in that page when it is sent, and has its show-if blocks decided per recipient then. The draft's subject is always the title you pass here, never the template's own subject line. The template's preview text is part of its rendered HTML and does reach the inbox, but the draft's own preview text field stays empty.",
     inputSchema: {
       type: "object",
       properties: {
         publicationId: PUBLICATION_ID_SCHEMA,
-        title: { type: "string" },
+        title: { type: "string", description: "The subject line subscribers see." },
+        ...POST_HEADER_PROPERTIES,
         kind: { type: "string", enum: ["newsletter", "broadcast"], description: "Email kind. 'newsletter' (default) can publish to the public site; 'broadcast' is one-time email-only." },
-        templateId: { type: "string", description: "Seed the draft from a published server template (see template.list). Takes precedence over contentHtml/contentSpec." },
-        variables: { type: "object", description: "Key/value map substituted into the template's {{variable}} placeholders when templateId is set." },
+        templateId: { type: "string", description: "Seed the draft from a published server template's published version (see template.list). Takes precedence over contentHtml/contentSpec." },
+        variables: { type: "object", description: "Key/value map substituted into the template's variable placeholders when templateId is set (both {{key}} and Visual Email Designer {key} forms). Values are HTML-escaped; use {{{key}}} in the template for raw HTML." },
         contentHtml: { type: "string", description: "Raw HTML content (use this OR contentSpec OR templateId)" },
         contentSpec: {
           type: "object",
@@ -1754,7 +1824,7 @@ export const MCP_TOOLS = [
   {
     name: "email.lint",
     description:
-      "Check email HTML against the Can I Email support matrix for the clients Mailtea refuses to regress (Apple Mail, Gmail, Outlook desktop). Returns {findings:[{slug, severity, feature, clients}], failCount, warnCount, strictClients, linted}. severity 'fail' means the layout BREAKS when unsupported (flex/grid collapse, absolute positioning, CSS variables, viewport units); 'warn' means it degrades gracefully (a gradient or shadow simply does not paint). Run this after writing an email — you cannot see the rendered result, and this is the check that catches what a preview would have shown you. Pass exactly one of issueId (lint what is saved) or html (lint before you post it).",
+      "Check email HTML against the Can I Email support matrix for the clients Mailtea refuses to regress (Apple Mail, Gmail, Outlook desktop). Returns {findings:[{slug, severity, feature, clients}], failCount, warnCount, strictClients, linted}. severity 'fail' means the layout BREAKS when unsupported (flex/grid collapse, absolute positioning, CSS variables, viewport units); 'warn' means it degrades gracefully (a gradient or shadow simply does not paint; a color-mix() color is dropped by Outlook desktop, so use a plain hex). Run this after writing an email. You cannot see the rendered result, and this is the check that catches what a preview would have shown you. Pass exactly one of issueId (lint what is saved) or html (lint before you post it).",
     inputSchema: {
       type: "object",
       properties: {
@@ -1771,12 +1841,14 @@ export const MCP_TOOLS = [
   },
   {
     name: "issue.update_draft",
-    description: "Update an existing draft issue. Provide contentHtml (raw HTML) or contentSpec (json-render spec).",
+    description:
+      "Update an existing draft issue. Only the fields you pass change: pass title to change the subject, name to rename the post, from/replyTo to set its sender headers, or contentHtml/contentSpec to replace the whole document (use issue.apply_ops for targeted edits).",
     inputSchema: {
       type: "object",
       properties: {
         issueId: { type: "string" },
-        title: { type: "string" },
+        title: { type: "string", description: "The subject line subscribers see. Omit to leave it unchanged." },
+        ...POST_HEADER_PROPERTIES,
         contentHtml: { type: "string", description: "Raw HTML content (use this OR contentSpec)" },
         contentSpec: {
           type: "object",
@@ -1788,7 +1860,7 @@ export const MCP_TOOLS = [
           required: ["root", "elements"]
         }
       },
-      required: ["issueId", "title"]
+      required: ["issueId"]
     }
   },
   {
@@ -2093,12 +2165,16 @@ export const MCP_TOOLS = [
   {
     name: "contact.import_csv",
     description:
-      "Import contacts from CSV text payload. Returns per-outcome counts plus enrolledAutomations, the number of automation enrollments the import created — always 0 unless enrollInAutomations is true.",
+      "Import contacts from CSV text. Only the email column is read: names and any other columns are not imported, and the result lists them in ignoredColumns. To store a name or another field, import first, then call contact.set_properties per contact. Returns per-outcome counts plus enrolledAutomations, the number of automation enrollments the import created (always 0 unless enrollInAutomations is true).",
     inputSchema: {
       type: "object",
       properties: {
         publicationId: PUBLICATION_ID_SCHEMA,
-        csvText: { type: "string" },
+        csvText: {
+          type: "string",
+          description:
+            "CSV text, one contact per row. With a header named email (any case), that column is read; without one, the first non-empty column is read as the address. Every other column is ignored."
+        },
         enrollInAutomations: {
           type: "boolean",
           description:
@@ -2680,15 +2756,17 @@ export const MCP_TOOLS = [
   },
   {
     name: "ai.generate_draft",
-    description: "Generate a draft from a prompt",
+    description:
+      "Return a placeholder scaffold for a draft: a title taken from the prompt and one placeholder paragraph. No AI model runs on Mailtea's side, it does not write copy, and nothing is saved. To make a real draft, write the email yourself (the newsletter.draft_from_brief prompt sets that up) and save it with issue.create_draft.",
     inputSchema: {
       type: "object",
       properties: {
         publicationId: PUBLICATION_ID_SCHEMA,
-        prompt: { type: "string" },
+        prompt: { type: "string", description: "What the email is about. Used for the scaffold's title." },
         tone: {
           type: "string",
-          enum: ["neutral", "friendly", "formal"]
+          enum: ["neutral", "friendly", "formal"],
+          description: "Accepted for compatibility. The scaffold does not change with it."
         }
       },
       required: ["prompt"]
@@ -2696,7 +2774,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "template.create",
-    description: `Create an email template. Exactly ONE content source: editor_doc, spec, or html. editor_doc (format "editor") is the same designed template the Visual Email Designer produces and the one to reach for when composing a real email — ${EDITOR_DOC_HELP} spec (format "spec") is the programmatic alternative for generated layouts; available components: Html, Head, Body, Container, Section, Row, Column, Heading, Text, Link, Button, Image, Hr, Preview, Markdown, MailteaHeader, MailteaFooter, MailteaSpacer, MailteaContentBlock. html (format "html") stores raw HTML verbatim. Whichever you use, the stored html is what every send reads, so a template is sendable from all three. Templates start as draft — call template.publish before an automation or issue can use one.`,
+    description: `Create an email template. Exactly ONE content source: editor_doc, spec, or html. editor_doc (format "editor") is the same designed template the Visual Email Designer produces and the one to reach for when composing a real email. ${EDITOR_DOC_HELP} spec (format "spec") is the programmatic alternative for generated layouts; available components: Html, Head, Body, Container, Section, Row, Column, Heading, Text, Link, Button, Image, Hr, Preview, Markdown, MailteaHeader, MailteaFooter, MailteaSpacer, MailteaContentBlock. html (format "html") stores raw HTML verbatim. Whichever you use, the template ends up with stored html, so it is sendable from all three. Templates start as draft, so call template.publish before an automation or issue can use one. Sends read the PUBLISHED version (the content, From and Reply-To as of the last template.publish), never later unpublished edits.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -2737,7 +2815,7 @@ export const MCP_TOOLS = [
   {
     name: "template.get",
     description:
-      'Get a single email template by ID, including its rendered html, its spec, and — for format "editor" — the editor_doc design source plus style_profile, mailtea_theme and global_css. This is the read half of editing a designed template: get it, change the doc, send it back through template.update. template.list omits all of those (a page of full documents would be a very different response size) and returns only category, preview_image_url and tags alongside the summary.',
+      'Get a single email template by ID, including its rendered html, its spec, and, for format "editor", the editor_doc design source plus style_profile, mailtea_theme and global_css. These fields are the working copy (the latest saved design), which may not be what is sending: has_unpublished_versions: true means it differs from the published version. This is the read half of editing a designed template: get it, change the doc, send it back through template.update. template.list omits all of those (a page of full documents would be a very different response size) and returns only category, preview_image_url and tags alongside the summary.',
     inputSchema: {
       type: "object",
       properties: {
@@ -2749,7 +2827,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "template.update",
-    description: `Update an email template. Pass only the fields to change. Providing spec re-renders email-safe HTML server-side; providing html switches the template to raw HTML; providing editor_doc switches it to format "editor" and re-renders. ${EDITOR_DOC_HELP} Sending html for a template that is ALREADY format "editor" is refused with 400 editor_template_html_not_accepted — its html is derived, and accepting raw html would orphan the design source; send editor_doc instead. The sidecars are sticky: a patch carrying only editor_doc keeps the stored style_profile / mailtea_theme / global_css, and a patch carrying only a sidecar re-bakes the html from the STORED doc, so the rendered email never drifts from the stored styling. Call template.get first to read the current editor_doc.`,
+    description: `Update an email template. Pass only the fields to change. Providing spec re-renders email-safe HTML server-side; providing html switches the template to raw HTML; providing editor_doc switches it to format "editor" and re-renders. ${EDITOR_DOC_HELP} Sending html for a template that is ALREADY format "editor" is refused with 400 editor_template_html_not_accepted, since its html is derived and accepting raw html would orphan the design source; send editor_doc instead. The sidecars are sticky: a patch carrying only editor_doc keeps the stored style_profile / mailtea_theme / global_css, and a patch carrying only a sidecar re-bakes the html from the STORED doc, so the rendered email never drifts from the stored styling. Call template.get first to read the current editor_doc. Editing a PUBLISHED template no longer unpublishes it: the change is saved as the working copy and the template keeps its published status and its published version keeps sending, with has_unpublished_versions: true on the response. That includes from, reply_to and style_profile: they are part of the published version too, so a new sender, reply-to address or page style reaches sends only after the next publish. Call template.publish to make the edit live.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -2797,7 +2875,7 @@ export const MCP_TOOLS = [
   {
     name: "template.publish",
     description:
-      "Publish a draft email template, making it the active version for sends. Only a published template can seed an issue, a post, or an automation's send_email step. Reversible with template.unpublish.",
+      "Publish an email template: its saved changes, including from and reply_to, become the version that sends. Only a published template can seed an issue, a post, or an automation's send_email step. Calling this on a template that is ALREADY published is how saved edits go live: editing or restoring a published template no longer publishes automatically (see template.update, template.restore_version). The change is saved with has_unpublished_versions: true, and this call is what promotes it. Reversible with template.unpublish.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2810,7 +2888,7 @@ export const MCP_TOOLS = [
   {
     name: "template.unpublish",
     description:
-      "Return a published email template to draft, taking it out of circulation without deleting it. The body is untouched and published_at is kept as history — only sendability is retracted, so anything that seeds from this template stops finding it. Unpublishing a template that is already a draft is a no-op, not an error, and template.publish puts it back.",
+      "Return a published email template to draft, taking it out of circulation without deleting it. The body is untouched and published_at is kept as history, and only sendability is retracted, so anything that seeds from this template stops finding it. This is the ONLY way to stop a published template from sending (short of deleting it): editing or restoring it no longer does that on its own. It also drops the published version, so the next template.publish starts from the current (working) content, not the old live one. Unpublishing a template that is already a draft is a no-op, not an error, and template.publish puts it back.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2823,7 +2901,7 @@ export const MCP_TOOLS = [
   {
     name: "template.versions",
     description:
-      "List an email template's design history, newest first. Metadata only — one version row carries a whole design document, so the list returns version (integer), origin (\"edit\" | \"publish\" | \"restore\"), restored_from_version, format, name, sealed, is_current, created_at, updated_at and author (or null), never the document itself. is_current marks the design the template is serving RIGHT NOW, which is not always the newest entry: a metadata-only update (renaming, retagging) touches the template without recording a version. The reply also carries retention: { max_versions, coalesce_window_seconds } — only the newest max_versions per template are kept, and consecutive edits by the SAME author inside the coalesce window collapse into one entry, so this is a history of saved designs, not a keystroke log. Feed a version number to template.restore_version to put that design back.",
+      "List an email template's design history, newest first. Metadata only: one version row carries a whole design document, so the list returns version (integer), origin (\"edit\" | \"publish\" | \"restore\"), restored_from_version, format, name, sealed, is_current, is_published, created_at, updated_at and author (or null), never the document itself. is_current marks the entry that matches the working copy (the saved design you are editing), NOT necessarily what is sending, and not always the newest entry either: a metadata-only update (renaming, retagging) touches the template without recording a version. is_published marks the entry automations and the API are sending now; the two differ while the template has unpublished changes. is_published is false on every entry of a draft, and on every entry of a template published before the field existed until it is published again. The reply also carries retention: { max_versions, coalesce_window_seconds }. Only the newest max_versions per template are kept, and consecutive edits by the SAME author inside the coalesce window collapse into one entry, so this is a history of saved designs, not a keystroke log. Feed a version number to template.restore_version to put that design back.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2841,7 +2919,7 @@ export const MCP_TOOLS = [
   {
     name: "template.restore_version",
     description:
-      "Put an older design from template.versions back onto the template. READ THIS BEFORE CALLING IT ON A LIVE TEMPLATE: restoring is a content write, so the template RETURNS TO DRAFT — automations, issues and the API STOP sending it until template.publish is called again. Restore a published template and its sends stop until you re-publish; the response's unpublished boolean reports whether that just happened, and re-publishing is the caller's job. History is FORWARD-ONLY — a restore never rewinds, truncates or reorders the list. It first records the design it is about to replace as its own version, then appends the restored design as the new newest version, so a restore is itself undoable: restore the entry directly above the one you just restored. Restoring the design that is already current is a no-op — nothing is written, the template stays published, and the reply is restored: false with reason \"identical\" and unpublished: false. Only the newest versions are kept (see retention on template.versions) and consecutive edits by the same author inside the coalesce window collapse into one entry, so a version can age out of history: asking for one that has returns 404 with code template_version_not_found. Returns { restored, restored_from_version, unpublished, message, template }.",
+      "Put an older design from template.versions back onto the template. ON A LIVE TEMPLATE: restoring is a content write, but it no longer returns the template to draft or stops it sending. The template stays published, the restored design is saved as its working copy (has_unpublished_versions: true on the returned template), and automations, issues and the API keep sending the CURRENTLY PUBLISHED version until template.publish is called to make the restored design live. The unpublished field on the response is kept for older clients and is always false now; read has_unpublished_versions or message instead. History is FORWARD-ONLY: a restore never rewinds, truncates or reorders the list. It first records the design it is about to replace as its own version, then appends the restored design as the new newest version, so a restore is itself undoable: restore the entry directly above the one you just restored. Restoring the design that is already current is a no-op: nothing is written, and the reply is restored: false with reason \"identical\" and unpublished: false. Only the newest versions are kept (see retention on template.versions) and consecutive edits by the same author inside the coalesce window collapse into one entry, so a version can age out of history: asking for one that has returns 404 with code template_version_not_found. Returns { restored, restored_from_version, unpublished, message, template }.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2915,19 +2993,25 @@ export const MCP_TOOLS = [
         },
         sender_id: {
           type: "string",
-          description: "Send as a named sender (alternative to from)."
+          description:
+            "Send as a named sender (alternative to from). With a template, from and sender_id may both be omitted: the publication's default sender is used, then the template's own From."
         },
         to: {
           type: ["string", "array"],
           items: { type: "string" },
           description: "Recipient address, or array of up to 50 addresses."
         },
-        subject: { type: "string", description: "Subject line (max 998 chars)." },
+        subject: {
+          type: "string",
+          description:
+            "Subject line (max 998 chars). Required unless you send a template, whose published subject is then used. With a template, {{variables}} in the subject are filled with the same values and fallbacks as the body."
+        },
         html: { type: "string", description: "HTML body. Use this OR template, not both." },
         text: { type: "string", description: "Plain-text body." },
         template: {
           type: "object",
-          description: "Stored template reference to render instead of inline html.",
+          description:
+            "Stored template reference to render instead of inline html. Its published subject, sender and reply-to are the defaults for this send. A template built in the Visual Email Designer is delivered inside its designed page background and card; raw HTML templates are sent exactly as stored.",
           properties: {
             id: { type: "string" },
             variables: { type: "object", description: "Template variable values." }
@@ -2955,6 +3039,16 @@ export const MCP_TOOLS = [
           }
         },
         headers: { type: "object", description: "Custom email headers (string values)." },
+        tracking_open: {
+          type: "boolean",
+          description:
+            "Set false to send without an open pixel. A domain with open tracking switched off cannot be overridden here."
+        },
+        tracking_click: {
+          type: "boolean",
+          description:
+            "Set false to send without rewritten links. A domain with click tracking switched off cannot be overridden here."
+        },
         attachments: {
           type: "array",
           description: "File attachments.",
@@ -2970,9 +3064,10 @@ export const MCP_TOOLS = [
           }
         }
       },
-      // Exactly one of from / sender_id is required; enforced in runTool since
-      // JSON Schema `required` can't express "exactly one of".
-      required: ["to", "subject"]
+      // subject and one of from / sender_id are required UNLESS a template is
+      // sent (it supplies both); enforced in runTool, since JSON Schema
+      // `required` can't express either rule.
+      required: ["to"]
     }
   },
   {
@@ -3195,7 +3290,7 @@ export const MCP_TOOLS = [
   {
     name: "domain.create",
     description:
-      "Register an email sending domain for a publication. Returns the DNS records (in 'records') the operator must add — each row's 'record' names what it is for (Ownership, DKIM, SPF, MX, Return-Path, Tracking), 'type' is the DNS type, and 'status' is that record's own state. Set purpose to 'email' (or 'both') to use it as a sending 'from' domain; both the ownership TXT and the DKIM TXT must verify before the domain can send. Pick the region closest to your recipients — it is fixed at creation, and moving a domain means deleting and re-adding it.",
+      "Register a domain for a publication: a sending domain (purpose 'email', or 'both' to also serve the site) or a website domain (purpose 'site', the default). An omitted purpose makes a 'site' domain, which cannot send email, so pass purpose 'email' for a domain you want to send from. Returns the DNS records (in 'records') the operator must add. Each row's 'record' names what it is for (Ownership, DKIM, SPF, MX, Return-Path, Tracking), 'type' is the DNS type, and 'status' is that record's own state. Set purpose to 'email' (or 'both') to use it as a sending 'from' domain; both the ownership TXT and the DKIM TXT must verify before the domain can send. Pick the region closest to your recipients: it is fixed at creation, and moving a domain means deleting and re-adding it.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3204,7 +3299,7 @@ export const MCP_TOOLS = [
         purpose: {
           type: "string",
           enum: ["email", "site", "both"],
-          description: "Use 'email' or 'both' for a sending domain. Defaults to 'site'."
+          description: "Use 'email' or 'both' for a sending domain. Defaults to 'site', a website-only domain that cannot send email."
         },
         is_primary: { type: "boolean" },
         // Hand-written rather than imported: this package ships with zero
@@ -3239,10 +3334,15 @@ export const MCP_TOOLS = [
       properties: {
         publicationId: PUBLICATION_ID_SCHEMA,
         limit: { type: "number", description: "Max results (1-100, default 20)." },
+        // No enum, unlike domain.create: a filter must accept every region
+        // the list itself reports, and a domain with no stored region reports
+        // the deployment's default, which is outside the catalog in local
+        // development (us-east-1) and on self-host. `domain-region-parity.test.ts`
+        // checks that this description still names every catalog region.
         region: {
           type: "string",
-          enum: ["us-west-1", "eu-west-1", "ap-southeast-1", "ap-southeast-2"],
-          description: "Only domains sending from this region."
+          description:
+            "Only domains sending from this region, as domain.list reports it: one of us-west-1, eu-west-1, ap-southeast-1, ap-southeast-2, or this deployment's default region."
         },
         status: {
           type: "string",
@@ -3905,7 +4005,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "automation.update",
-    description: `Update an automation. Pass only the fields to change; passing steps replaces the whole graph and cuts a new version. Fields you omit keep their STORED value, so reentry_window_seconds must be sent as null to clear it — switching reentry_policy from once_per_window to once or always without doing so fails with "reentry_window_seconds is only valid when reentry_policy is once_per_window" on this and every later call. Saving is never blocked for draft/paused/archived automations — issues ride along informationally — but a graph update to an ACTIVE automation with errors is refused (pause, save, start). ${AUTOMATION_SNAKE_CASE_HELP} ${AUTOMATION_STEP_CONFIG_HELP} ${AUTOMATION_CATALOG_HELP}`,
+    description: `Update an automation. Pass only the fields to change; passing steps replaces the whole graph and cuts a new version. Fields you omit keep their STORED value, so reentry_window_seconds must be sent as null to clear it. Switching reentry_policy from once_per_window to once or always without doing so fails with "reentry_window_seconds is only valid when reentry_policy is once_per_window" on this and every later call. Saving is never blocked for draft/paused/archived automations: issues ride along informationally. A graph update to an ACTIVE automation is refused with 422 active_graph_invalid only when it adds an error the live version does not already have (issues[] lists just those new ones; issues already live carry pre_existing: true and do not block). Changing the trigger (trigger_type or trigger_key) of an ACTIVE automation is refused with 422 trigger_locked_while_active: pause it first, then change the trigger. ${AUTOMATION_SNAKE_CASE_HELP} ${AUTOMATION_STEP_CONFIG_HELP} ${AUTOMATION_CATALOG_HELP}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -3947,7 +4047,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "automation.enable",
-    description: `Activate an automation so it starts enrolling contacts. Refused with coded issues[] when the graph has errors. Also refused with code no_verified_sender when a send_email step has no sender it can send from: reason is NO_SENDER (no step sender, no publication default, no template from_address), DOMAIN_NOT_VERIFIED, WRONG_PURPOSE, DKIM_NOT_VERIFIED or INVALID_FROM, and steps[] names every blocking step key — add a sender or verify its sending domain, then enable again. There is deliberately no automation.test tool — a test run sends real, billed email, so it is not exposed to agents. ${AUTOMATION_SNAKE_CASE_HELP}`,
+    description: `Activate an automation so it starts enrolling contacts. Refused with coded issues[] when the graph has errors, except an unknown_step_ref at a config.* path or a trigger missing_branch that the version it last ran on already had (pre_existing: true); a never-started draft is blocked by those too. Also refused with code no_verified_sender when a send_email step has no sender it can send from: reason is NO_SENDER (no step sender, no publication default, no template from_address), DOMAIN_NOT_VERIFIED, WRONG_PURPOSE, DKIM_NOT_VERIFIED, INVALID_FROM, CUSTOM_DOMAIN_REQUIRED or BUILT_IN_SENDER, and steps[] names every blocking step key. Add a sender or verify its sending domain, then enable again. Two reasons are Mailtea Cloud only, because an automation emails contacts and some sends only reach the team's own members: CUSTOM_DOMAIN_REQUIRED means the team has not verified a sending domain of its own, so verify one (domain.create with purpose 'email', then domain.verify); BUILT_IN_SENDER means the step sends from the built-in {slug}.mailtea.email address, so give it a sender or template From on the team's verified domain. Then enable again. There is deliberately no automation.test tool: a test run sends real, billed email, so it is not exposed to agents. ${AUTOMATION_SNAKE_CASE_HELP}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -4427,7 +4527,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
   {
     name: "site.asset_upload",
     description:
-      "Upload an image into the publication's asset library and get back the permanent URL to use as an image block's src. This is the ONLY way to put a picture that is not already in the library into an email, a template, or a site page — an image block needs an absolute URL, and hot-linking somebody else's host breaks the moment they move it. PNG, JPEG, GIF or WebP only, 5 MB max; SVG is refused because a hostile one can run script from our own domain. The bytes must really be the format you declare. Send `width`/`height` when you know them: the editor uses them to reserve space so the layout does not jump.",
+      "Upload an image into the publication's asset library and get back the permanent URL to use as an image block's src. This is the ONLY way to put a picture that is not already in the library into an email, a template, or a site page: an image block needs an absolute URL, and hot-linking somebody else's host breaks the moment they move it. PNG, JPEG, GIF, WebP or SVG, 5 MB max. SVG is accepted for site pages (it is served with a sandbox policy so it cannot run script), but Gmail and Outlook do not show SVG images in email, so use PNG or JPEG for any image that goes into an email or template. The bytes must really be the format you declare. Send `width`/`height` when you know them: the editor uses them to reserve space so the layout does not jump.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4506,13 +4606,56 @@ export const MCP_RESOURCES = [
 export const MCP_PROMPTS = [
   {
     name: "newsletter.draft_from_brief",
-    description: "Create a newsletter draft from a short brief"
+    description:
+      "Write a newsletter email from a short brief, then save it as a draft with issue.create_draft. Nothing is sent.",
+    arguments: [
+      {
+        name: "brief",
+        description: "What the email is about, in a sentence or a paragraph.",
+        required: true
+      },
+      {
+        name: "audience",
+        description: "Who reads it, for example 'customers on the free plan'.",
+        required: false
+      },
+      {
+        name: "tone",
+        description: "How it should sound: friendly, neutral or formal.",
+        required: false
+      },
+      {
+        name: "call_to_action",
+        description: "The one thing a reader should do, with its link if there is one.",
+        required: false
+      }
+    ]
   },
   {
     name: "newsletter.subject_line_pack",
-    description: "Generate subject line variants"
+    description: "Write subject line and preview text pairs for an email.",
+    arguments: [
+      {
+        name: "topic",
+        description: "What the email is about.",
+        required: true
+      },
+      {
+        name: "count",
+        description: "How many subject lines to write, from 1 to 30. Defaults to 10.",
+        required: false
+      },
+      {
+        name: "audience",
+        description: "Who reads it.",
+        required: false
+      }
+    ]
   }
 ] as const;
+
+/** A request the client can fix by changing its params: JSON-RPC -32602. */
+class InvalidParamsError extends Error {}
 
 function response(id: JsonRpcId, result: unknown): JsonRpcResponse {
   return {
@@ -4540,6 +4683,30 @@ function asObject(value: unknown): Record<string, unknown> {
   }
 
   return value as Record<string, unknown>;
+}
+
+/**
+ * A post header argument (name, from, replyTo): a string is forwarded as given,
+ * including "" which clears it; anything else means "not passed".
+ */
+function readPostHeaderArgs(
+  nameArg: unknown,
+  fromArg: unknown,
+  replyToArg: unknown
+): {
+  name?: string;
+  fromAddress?: string;
+  replyTo?: string;
+} {
+  const pick = (value: unknown) => (typeof value === "string" ? value : undefined);
+  const name = pick(nameArg);
+  const fromAddress = pick(fromArg);
+  const replyTo = pick(replyToArg);
+  return {
+    ...(name !== undefined ? { name } : {}),
+    ...(fromAddress !== undefined ? { fromAddress } : {}),
+    ...(replyTo !== undefined ? { replyTo } : {})
+  };
 }
 
 function asOptionalString(value: unknown): string | undefined {
@@ -4900,7 +5067,7 @@ function resolvePublicationId(options: McpRuntimeOptions): string | null {
 
 /**
  * The publication a tool call acts on: the explicit argument, else the one this
- * connection is already authorized for.
+ * connection is already authorized for, else the only one the key reaches.
  *
  * `options.publicationId` is the connection's publication — the hosted endpoint
  * fills it from the OAuth grant, stdio from `MAILTEA_PUBLICATION_ID`. Using it
@@ -4910,17 +5077,29 @@ function resolvePublicationId(options: McpRuntimeOptions): string | null {
  * argument naming a DIFFERENT publication still travels to the server and is
  * still rejected there — this resolves an id, it does not authorize one.
  *
- * The message when nothing resolves is deliberately the one `readRequiredString`
- * has always thrown: a stdio user with no `MAILTEA_PUBLICATION_ID` and no
- * argument is in exactly the position they were in before.
+ * THE TEAM-SCOPED PERSONAL KEY. The default key Studio mints is scoped to the
+ * TEAM (a full-access key is always minted for the team, never a publication),
+ * so no connection publication exists and every tool that advertises
+ * `publicationId` as optional refused it (user-testing 0924a, mcp/F10). For
+ * such a key the default is the only publication its person belongs to in the
+ * KEY'S OWN team: decided by the hosted endpoint server-side
+ * (`options.reachablePublications`), or over stdio by asking `auth.me` with the
+ * caller's own token. None or several is an error that lists what to pass. A
+ * service key takes no such default, and no default is taken at all when the
+ * request's active team is not the key's own (review of batch D1, H2).
+ * Still defaulting, not authorizing: the id travels to the server and is
+ * checked there like any other.
+ *
+ * The message keeps the words it has always started with, "Missing required
+ * string argument: <key>", and adds the fix after them.
  */
-function readPublicationId(
+async function readPublicationId(
   args: Record<string, unknown>,
   options: McpRuntimeOptions,
   // The automation and event tools spell their arguments snake_case; the error
   // has to name the key the caller actually passes.
   key: "publicationId" | "publication_id" = "publicationId"
-): string {
+): Promise<string> {
   const explicit = asOptionalString(args[key]);
   if (explicit) {
     return explicit;
@@ -4931,7 +5110,148 @@ function readPublicationId(
     return connected;
   }
 
-  throw new Error(`Missing required string argument: ${key}`);
+  if (options.reachablePublications !== undefined) {
+    return chooseReachablePublication(options.reachablePublications, key);
+  }
+
+  return discoverPublicationId(options, key);
+}
+
+type AuthMePublicationScope = {
+  tokenType?: string | null;
+  organizationId?: string | null;
+  credentialOrganizationId?: string | null;
+  credentialPublicationId?: string | null;
+  publicationMemberships?: Array<{
+    publicationId?: string;
+    publicationName?: string;
+    organizationId?: string;
+  }>;
+};
+
+function missingPublicationMessage(key: "publicationId" | "publication_id"): string {
+  return `Missing required string argument: ${key}.`;
+}
+
+/**
+ * The default from a list of publications the credential reaches, or the error
+ * that says what to pass. Null means there is nothing that may be offered.
+ */
+function chooseReachablePublication(
+  reachable: ReadonlyArray<{ id: string; name: string }> | null,
+  key: "publicationId" | "publication_id"
+): string {
+  const missing = missingPublicationMessage(key);
+  if (reachable === null) {
+    throw new Error(
+      `${missing} Pass the id of the publication to act on; publication.list shows the ones this key can reach.`
+    );
+  }
+
+  if (reachable.length === 1) {
+    return reachable[0]!.id;
+  }
+
+  if (reachable.length === 0) {
+    throw new Error(
+      `${missing} This key reaches no publication yet: create one with publication.create, then pass its id as ${key}.`
+    );
+  }
+
+  const shown = reachable
+    .slice(0, 5)
+    .map((publication) => `${publication.id} (${publication.name})`)
+    .join(", ");
+  const more = reachable.length > 5 ? ` and ${reachable.length - 5} more` : "";
+  throw new Error(
+    `${missing} This key reaches ${reachable.length} publications, so say which one: pass ${key} as one of ${shown}${more}. publication.list shows them all, and a key scoped to one publication makes it the default.`
+  );
+}
+
+/** How long a discovered default is reused for the same token and API. */
+const PUBLICATION_DISCOVERY_TTL_MS = 60_000;
+
+/**
+ * Successful stdio discoveries, keyed by API base URL and token, so one agent
+ * turn of ten tool calls asks auth.me once rather than ten times. Only a
+ * RESOLVED id is kept: an error is never cached, because the fix it names
+ * (create a publication, say) should take effect on the very next call.
+ */
+const discoveredPublications = new Map<string, { publicationId: string; expiresAt: number }>();
+
+/** The only publication this credential reaches, or an error that names the fix. */
+async function discoverPublicationId(
+  options: McpRuntimeOptions,
+  key: "publicationId" | "publication_id"
+): Promise<string> {
+  const cacheKey = `${resolveApiBaseUrl(options)}\n${resolveToken(options) ?? ""}`;
+  const cached = discoveredPublications.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.publicationId;
+  }
+  discoveredPublications.delete(cacheKey);
+
+  let me: AuthMePublicationScope;
+  try {
+    me = asObject(await callTrpc<unknown>("auth.me", {}, options, "query")) as AuthMePublicationScope;
+  } catch (err) {
+    throw new Error(
+      `${missingPublicationMessage(key)} Could not look up which publications this key reaches (${toErrorMessage(err)}). Pass the id of the publication to act on; publication.list shows the ones this key can reach.`
+    );
+  }
+
+  const publicationId = publicationFromAuthMe(me, key);
+  if (discoveredPublications.size > 100) {
+    discoveredPublications.clear();
+  }
+  discoveredPublications.set(cacheKey, {
+    publicationId,
+    expiresAt: Date.now() + PUBLICATION_DISCOVERY_TTL_MS
+  });
+  return publicationId;
+}
+
+function publicationFromAuthMe(
+  me: AuthMePublicationScope,
+  key: "publicationId" | "publication_id"
+): string {
+  // A publication-scoped key names its publication. Over the hosted endpoint
+  // that already arrived as `options.publicationId`; stdio only learns it here.
+  const scoped = asOptionalString(me.credentialPublicationId ?? undefined);
+  if (scoped) {
+    return scoped;
+  }
+
+  // A service key acts for the team, not for the person who minted it, so that
+  // person's memberships say nothing about which publication it means.
+  if (me.tokenType !== "pat") {
+    return chooseReachablePublication(null, key);
+  }
+
+  // Only inside the key's OWN team, and only when that is also the team this
+  // request resolved to. `organizationId` is the ACTIVE team, which falls back
+  // to another of the person's teams once they are removed from the key's, so
+  // defaulting from it put a team-A key to work in team B (review of batch D1,
+  // H2). An older server that does not report `credentialOrganizationId` gets
+  // no default either: refusing is the safe reading of not knowing.
+  const keyTeam = asOptionalString(me.credentialOrganizationId ?? undefined);
+  if (!keyTeam || keyTeam !== asOptionalString(me.organizationId ?? undefined)) {
+    return chooseReachablePublication(null, key);
+  }
+
+  const seen = new Set<string>();
+  const reachable: Array<{ id: string; name: string }> = [];
+  for (const membership of Array.isArray(me.publicationMemberships) ? me.publicationMemberships : []) {
+    const id = asOptionalString(membership?.publicationId);
+    if (!id || seen.has(id)) continue;
+    if (membership.organizationId !== keyTeam) {
+      continue;
+    }
+    seen.add(id);
+    reachable.push({ id, name: asOptionalString(membership.publicationName) ?? id });
+  }
+
+  return chooseReachablePublication(reachable, key);
 }
 
 function parseAnalyticsSummaryUri(uri: string): { publicationId?: string; range: IssueAnalyticsRange } | null {
@@ -5082,22 +5402,88 @@ async function callRestApi<T>(
 
   if (!httpResponse.ok) {
     const failure = new Error(
-      (payload as any)?.error ?? `${httpResponse.status} ${httpResponse.statusText}`
-    ) as Error & { issues?: unknown };
+      describeRestFailure(payload, `${httpResponse.status} ${httpResponse.statusText}`)
+    ) as Error & { issues?: unknown; data?: unknown };
     // Automations answer a bad graph with coded `issues[]` alongside `error`. An
     // agent that can only see "400" cannot self-correct, so carry them along.
     if (Array.isArray((payload as any)?.issues)) {
       failure.issues = (payload as any).issues;
     }
+    const data = restFailureData(payload, httpResponse.status);
+    if (data) failure.data = data;
     throw failure;
   }
 
   return payload as T;
 }
 
+/**
+ * The one-line message for a failed REST call: the API's `error`, then the
+ * parts of the body that say WHY and what to branch on.
+ *
+ * Only `error` used to survive. The API also sends `details` (the renderer's
+ * reason behind "Spec rendering failed", or zod's field list behind
+ * "Validation failed") and `code`/`reason` (which many tool descriptions tell
+ * the agent to branch on, e.g. `no_verified_sender`, `region_not_available`),
+ * so an agent was told to act on fields it was never shown (run 0924a, mcp/F12
+ * and mcp/F16).
+ */
+function describeRestFailure(payload: unknown, fallback: string): string {
+  const body = asObject(payload);
+  const headline = asOptionalString(body.error) ?? fallback;
+  let message = headline;
+
+  const details = body.details;
+  if (typeof details === "string" && details.trim() && details.trim() !== headline) {
+    message += `: ${details.trim()}`;
+  } else if (Array.isArray(details) && details.length > 0) {
+    const fields = details
+      .slice(0, 5)
+      .map((item) => {
+        const entry = asObject(item);
+        const path = Array.isArray(entry.path) ? entry.path.join(".") : asOptionalString(entry.path);
+        const text = asOptionalString(entry.message);
+        if (!text) return null;
+        return path ? `${path}: ${text}` : text;
+      })
+      .filter((line): line is string => line !== null);
+    if (fields.length > 0) {
+      message += `: ${fields.join("; ")}${details.length > 5 ? ` (and ${details.length - 5} more)` : ""}`;
+    }
+  }
+
+  const facts: string[] = [];
+  const code = asOptionalString(body.code);
+  const reason = asOptionalString(body.reason);
+  if (code) facts.push(`code: ${code}`);
+  if (reason && reason !== code) facts.push(`reason: ${reason}`);
+  if (Array.isArray(body.steps) && body.steps.every((step) => typeof step === "string") && body.steps.length > 0) {
+    facts.push(`steps: ${(body.steps as string[]).join(", ")}`);
+  }
+  if (facts.length > 0) {
+    message += ` (${facts.join("; ")})`;
+  }
+
+  return message;
+}
+
+/** The machine-readable half of a REST failure, for the JSON-RPC `error.data`. */
+function restFailureData(payload: unknown, status: number): Record<string, unknown> | null {
+  const body = asObject(payload);
+  const data: Record<string, unknown> = { status };
+  for (const key of ["code", "reason", "steps", "details", "issues", "restriction", "domain"]) {
+    if (body[key] !== undefined) data[key] = body[key];
+  }
+  return Object.keys(data).length > 1 ? data : null;
+}
+
 type AutomationValidationIssue = {
   code: string;
-  severity: string;
+  /**
+   * Automation graph issues carry one; event property issues (event.send
+   * against a schema) do not. Printed only when present.
+   */
+  severity?: string;
   step_key?: string;
   path?: string;
   message: string;
@@ -5130,7 +5516,10 @@ function formatAutomationIssues(issues: AutomationValidationIssue[]): string {
         : issue.path
           ? ` [${issue.path}]`
           : "";
-      return `- ${issue.severity} ${issue.code}${where}: ${issue.message}`;
+      // `severity` is optional: printing it unconditionally put a literal
+      // "undefined" in front of every event property issue.
+      const severity = issue.severity ? `${issue.severity} ` : "";
+      return `- ${severity}${issue.code}${where}: ${issue.message}`;
     })
     .join("\n");
 }
@@ -5151,9 +5540,11 @@ async function callAutomationApi<T>(
   } catch (err) {
     const issues = (err as { issues?: unknown }).issues;
     if (Array.isArray(issues) && issues.length > 0) {
-      throw new Error(
+      const rethrown = new Error(
         `${toErrorMessage(err)}\n${formatAutomationIssues(issues as AutomationValidationIssue[])}`
-      );
+      ) as Error & { data?: unknown };
+      rethrown.data = (err as { data?: unknown }).data;
+      throw rethrown;
     }
 
     throw err;
@@ -5229,6 +5620,93 @@ const EMAIL_SEND_FIELDS = [
   "attachments"
 ] as const;
 
+/**
+ * The issue as it stands once delivery progress has been read.
+ *
+ * `issue.sendNow` answers with the row as it was when the send STARTED
+ * (`status: "sending"`) and with its whole document. send_and_wait handed that
+ * back beside a `progress.status` of "sent", so the reply contradicted itself
+ * and carried ~21 KB of contentJson nobody asked for (user-testing 0924a,
+ * mcp/F25). The summary keeps the identifying fields and takes status and
+ * timestamps from the progress read, which is the later fact.
+ */
+function issueStateAfterProgress(
+  issue: IssueRecord,
+  progress: IssueDeliveryProgress
+): Record<string, unknown> {
+  return {
+    id: issue.id,
+    publicationId: issue.publicationId,
+    title: issue.title,
+    status: progress.status,
+    createdAt: issue.createdAt,
+    updatedAt: progress.updatedAt ?? issue.updatedAt,
+    scheduledAt: issue.scheduledAt ?? null,
+    sentAt: progress.sentAt ?? issue.sentAt ?? null
+  };
+}
+
+/** Every argument name each tool's inputSchema declares, by tool name. */
+const TOOL_ARGUMENT_NAMES: ReadonlyMap<string, readonly string[]> = new Map(
+  (MCP_TOOLS as ReadonlyArray<{ name: string; inputSchema: { properties?: Record<string, unknown> } }>).map(
+    (tool) => [tool.name, Object.keys(tool.inputSchema.properties ?? {})]
+  )
+);
+
+function editDistance(a: string, b: string): number {
+  const row = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= a.length; i += 1) {
+    let previous = row[0]!;
+    row[0] = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const current = row[j]!;
+      row[j] = Math.min(row[j]! + 1, row[j - 1]! + 1, previous + (a[i - 1] === b[j - 1] ? 0 : 1));
+      previous = current;
+    }
+  }
+  return row[b.length]!;
+}
+
+/** The declared name an unknown one was probably meant to be, if any. */
+function closestArgumentName(unknown: string, declared: readonly string[]): string | null {
+  const squash = (value: string) => value.toLowerCase().replace(/[_-]/g, "");
+  const exact = declared.find((name) => squash(name) === squash(unknown));
+  if (exact) return exact;
+  if (unknown.length < 4) return null;
+  let best: { name: string; distance: number } | null = null;
+  for (const name of declared) {
+    const distance = editDistance(squash(unknown), squash(name));
+    if (distance <= 2 && (!best || distance < best.distance)) best = { name, distance };
+  }
+  return best?.name ?? null;
+}
+
+/**
+ * A sentence naming the arguments this call passed that the tool does not
+ * declare, or null when there are none.
+ *
+ * WARN, NOT REFUSE. Every tool used to drop an unknown key without a word, so
+ * `email.list {tags: [...]}` returned the whole unfiltered list and the agent
+ * believed it had filtered (user-testing 0924a, mcp/F25). Refusing unknown
+ * keys (`additionalProperties: false`) would turn every agent that sends one
+ * harmless extra field today into a failed call, so the call still runs and
+ * the result says what was ignored and what the tool does accept.
+ * `tool-contract.test.ts` pins that every key a tool reads is declared, so
+ * this never calls a key "ignored" that was used.
+ */
+function unknownArgumentsWarning(toolName: string, args: Record<string, unknown>): string | null {
+  const declared = TOOL_ARGUMENT_NAMES.get(toolName);
+  if (!declared) return null;
+  const unknown = Object.keys(args).filter((key) => !declared.includes(key));
+  if (unknown.length === 0) return null;
+  const named = unknown.map((key) => {
+    const suggestion = closestArgumentName(key, declared);
+    return suggestion ? `${key} (did you mean ${suggestion}?)` : key;
+  });
+  const accepts = declared.length > 0 ? declared.join(", ") : "no arguments";
+  return `Ignored unknown argument${unknown.length === 1 ? "" : "s"}: ${named.join(", ")}. ${toolName} accepts: ${accepts}.`;
+}
+
 async function runTool(
   toolName: string,
   args: Record<string, unknown>,
@@ -5245,7 +5723,7 @@ async function runTool(
   }
 
   if (toolName === "issue.create_draft") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const title = readRequiredString(args, "title");
     const kind = args.kind === "broadcast" ? "broadcast" : args.kind === "newsletter" ? "newsletter" : undefined;
     const templateId = asOptionalString(args.templateId);
@@ -5266,11 +5744,14 @@ async function runTool(
       resolvedHtml = rendered.html;
     }
 
+    const headers = readPostHeaderArgs(args.name, args.from, args.replyTo);
     const draft = await callTrpc<IssueRecord>(
       "issue.createDraft",
       {
         publicationId,
         title,
+        ...headers,
+        ...(Object.keys(headers).length > 0 ? { strictHeaders: true } : {}),
         ...(kind ? { kind } : {}),
         ...(templateId
           ? { templateId, ...(variables ? { variables } : {}) }
@@ -5391,7 +5872,8 @@ async function runTool(
 
   if (toolName === "issue.update_draft") {
     const issueId = readRequiredString(args, "issueId");
-    const title = readRequiredString(args, "title");
+    const title = asOptionalString(args.title);
+    const headers = readPostHeaderArgs(args.name, args.from, args.replyTo);
     const contentHtml = asOptionalString(args.contentHtml);
     const contentSpec = args.contentSpec as Record<string, unknown> | undefined;
 
@@ -5410,7 +5892,9 @@ async function runTool(
       "issue.updateDraft",
       {
         issueId,
-        title,
+        ...(title ? { title } : {}),
+        ...headers,
+        ...(Object.keys(headers).length > 0 ? { strictHeaders: true } : {}),
         ...(resolvedHtml
           ? {
               contentJson: {
@@ -5438,7 +5922,7 @@ async function runTool(
   }
 
   if (toolName === "issue.list_recent") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const requestedLimit = readOptionalNumber(args, "limit");
     const limit = Math.max(1, Math.min(50, Math.trunc(requestedLimit ?? 10)));
 
@@ -5497,7 +5981,7 @@ async function runTool(
   }
 
   if (toolName === "publication.domain_list") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const requestedLimit = readOptionalNumber(args, "limit");
     const limit = Math.max(1, Math.min(100, Math.trunc(requestedLimit ?? 50)));
 
@@ -5520,7 +6004,7 @@ async function runTool(
   }
 
   if (toolName === "publication.domain_upsert") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const host = readRequiredString(args, "host");
     const isPrimary = readOptionalBoolean(args, "isPrimary");
     const proxyTarget = asOptionalString(args.proxyTarget);
@@ -5543,7 +6027,7 @@ async function runTool(
   }
 
   if (toolName === "publication.domain_verify") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
     const verificationValue = asOptionalString(args.verificationValue);
 
@@ -5564,7 +6048,7 @@ async function runTool(
   }
 
   if (toolName === "publication.domain_set_primary") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
 
     const result = await callTrpc<PublicationDomainUpsertResult>(
@@ -5580,7 +6064,7 @@ async function runTool(
   }
 
   if (toolName === "publication.domain_remove") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
 
     const result = await callTrpc<PublicationDomainRemoveResult>(
@@ -5596,7 +6080,7 @@ async function runTool(
   }
 
   if (toolName === "publication.domain_traefik_preview") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
 
     const preview = await callTrpc<PublicationDomainTraefikPreview>(
       "publication.domainTraefikPreview",
@@ -5614,7 +6098,7 @@ async function runTool(
   }
 
   if (toolName === "sender.list") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const requestedLimit = readOptionalNumber(args, "limit");
     const limit = Math.max(1, Math.min(100, Math.trunc(requestedLimit ?? 100)));
 
@@ -5634,7 +6118,7 @@ async function runTool(
   }
 
   if (toolName === "sender.create") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const name = readRequiredString(args, "name");
     const email = readRequiredString(args, "email");
     const replyTo = asOptionalString(args.replyTo);
@@ -5659,7 +6143,7 @@ async function runTool(
   }
 
   if (toolName === "sender.update") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const senderId = readRequiredString(args, "senderId");
     const name = asOptionalString(args.name);
     const replyTo = asOptionalString(args.replyTo);
@@ -5681,7 +6165,7 @@ async function runTool(
   }
 
   if (toolName === "sender.set_default") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const senderId = readRequiredString(args, "senderId");
 
     const result = await callTrpc<SenderMutationResult>(
@@ -5694,7 +6178,7 @@ async function runTool(
   }
 
   if (toolName === "sender.delete") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const senderId = readRequiredString(args, "senderId");
 
     const result = await callTrpc<SenderRemoveResult>(
@@ -5782,7 +6266,7 @@ async function runTool(
   }
 
   if (toolName === "contact.list") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const status = readContactStatus(args, "status");
     const query = asOptionalString(args.query);
     const requestedLimit = readOptionalNumber(args, "limit");
@@ -5812,7 +6296,7 @@ async function runTool(
   }
 
   if (toolName === "contact.upsert") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const email = readRequiredString(args, "email");
     const referrerContactId = asOptionalString(args.referrerContactId);
 
@@ -5832,7 +6316,7 @@ async function runTool(
   }
 
   if (toolName === "contact.set_status") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const contactId = readRequiredString(args, "contactId");
     const status = readContactStatus(args, "status");
     if (!status) {
@@ -5855,7 +6339,7 @@ async function runTool(
   }
 
   if (toolName === "contact.import_csv") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const csvText = readRequiredString(args, "csvText");
     // Both omitted rather than sent as false: the procedure defaults both to
     // false, and an absent key keeps the payload identical to what every
@@ -5874,14 +6358,24 @@ async function runTool(
       options
     );
 
+    // Named in the text as well as the structure: a column that did nothing
+    // is exactly what an agent needs to notice before it sends a newsletter
+    // that greets everyone as "friend" (user-testing 0924a, mcp/F23).
+    const ignored = (result.ignoredColumns ?? []).slice(0, 20);
+    const ignoredTotal = Math.max(result.ignoredColumnCount ?? 0, ignored.length);
+    const ignoredMore = ignoredTotal > ignored.length ? ` and ${ignoredTotal - ignored.length} more` : "";
+    const ignoredNote =
+      ignored.length > 0
+        ? `. Ignored column${ignoredTotal === 1 ? "" : "s"}: ${ignored.join(", ")}${ignoredMore} (only the email column is imported; use contact.set_properties to store other fields).`
+        : "";
     return makeToolResult(
-      `Contact import complete for ${publicationId}: +${result.createdCount} new, ${result.reactivatedCount} reactivated, ${result.invalidCount} invalid, ${result.enrolledAutomations ?? 0} enrolled in automations`,
+      `Contact import complete for ${publicationId}: +${result.createdCount} new, ${result.reactivatedCount} reactivated, ${result.invalidCount} invalid, ${result.enrolledAutomations ?? 0} enrolled in automations${ignoredNote}`,
       result
     );
   }
 
   if (toolName === "contact.referral_summary") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const requestedLimit = readOptionalNumber(args, "limit");
     const limit = Math.max(1, Math.min(100, Math.trunc(requestedLimit ?? 20)));
 
@@ -5904,7 +6398,7 @@ async function runTool(
   }
 
   if (toolName === "contact.referral_milestones") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const requestedLimit = readOptionalNumber(args, "limit");
     const limit = Math.max(1, Math.min(200, Math.trunc(requestedLimit ?? 100)));
 
@@ -5927,7 +6421,7 @@ async function runTool(
   }
 
   if (toolName === "contact.referral_milestone_upsert") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const title = readRequiredString(args, "title");
     const description = asOptionalString(args.description);
     const milestoneId = asOptionalString(args.milestoneId);
@@ -5959,7 +6453,7 @@ async function runTool(
   }
 
   if (toolName === "contact.referral_milestone_remove") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const milestoneId = readRequiredString(args, "milestoneId");
 
     const result = await callTrpc<{ removed: boolean; milestoneId: string }>(
@@ -5975,7 +6469,7 @@ async function runTool(
   }
 
   if (toolName === "contact.referral_rewards") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const contactId = asOptionalString(args.contactId);
     const requestedLimit = readOptionalNumber(args, "limit");
     const limit = Math.max(1, Math.min(500, Math.trunc(requestedLimit ?? 100)));
@@ -6000,7 +6494,7 @@ async function runTool(
   }
 
   if (toolName === "monetize.offer_list") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const status = readSponsorOfferStatus(args, "status");
     const requestedLimit = readOptionalNumber(args, "limit");
     const limit = Math.max(1, Math.min(200, Math.trunc(requestedLimit ?? 100)));
@@ -6025,7 +6519,7 @@ async function runTool(
   }
 
   if (toolName === "monetize.offer_upsert") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const offerId = asOptionalString(args.offerId);
     const title = readRequiredString(args, "title");
     const sponsorName = readRequiredString(args, "sponsorName");
@@ -6070,7 +6564,7 @@ async function runTool(
   }
 
   if (toolName === "monetize.offer_remove") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const offerId = readRequiredString(args, "offerId");
 
     const result = await callTrpc<SponsorOfferRemoveResult>(
@@ -6086,7 +6580,7 @@ async function runTool(
   }
 
   if (toolName === "section.list") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const requestedLimit = readOptionalNumber(args, "limit");
     const limit = Math.max(1, Math.min(200, Math.trunc(requestedLimit ?? 100)));
 
@@ -6126,7 +6620,7 @@ async function runTool(
   }
 
   if (toolName === "section.pack_create") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const title = readRequiredString(args, "title");
     const description = asOptionalString(args.description);
     const styleProfile = readOptionalJsonObject(args, "styleProfile");
@@ -6148,7 +6642,7 @@ async function runTool(
   }
 
   if (toolName === "section.pack_update") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const packId = readRequiredString(args, "packId");
     const title = readRequiredString(args, "title");
     const description = asOptionalString(args.description);
@@ -6172,7 +6666,7 @@ async function runTool(
   }
 
   if (toolName === "section.pack_remove") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const packId = readRequiredString(args, "packId");
 
     const result = await callTrpc<SectionPackRemoveResult>(
@@ -6188,7 +6682,7 @@ async function runTool(
   }
 
   if (toolName === "section.pack_revisions") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const packId = readRequiredString(args, "packId");
     const requestedLimit = readOptionalNumber(args, "limit");
     const limit = Math.max(1, Math.min(100, Math.trunc(requestedLimit ?? 30)));
@@ -6217,7 +6711,7 @@ async function runTool(
   }
 
   if (toolName === "section.pack_restore_revision") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const packId = readRequiredString(args, "packId");
     const revisionId = readRequiredString(args, "revisionId");
 
@@ -6238,7 +6732,7 @@ async function runTool(
   }
 
   if (toolName === "section.import_pack") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const templateId = readRequiredString(args, "templateId");
 
     const result = await callTrpc<SectionImportResult>(
@@ -6257,7 +6751,7 @@ async function runTool(
   }
 
   if (toolName === "section.create") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const name = readRequiredString(args, "name");
     const contentJson = readRequiredJsonObjectArray(args, "contentJson");
 
@@ -6316,7 +6810,7 @@ async function runTool(
   }
 
   if (toolName === "issue.preview_draft") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const title = readRequiredString(args, "title");
     const html = readRequiredString(args, "html");
     const plainText = asOptionalString(args.plainText);
@@ -6341,7 +6835,7 @@ async function runTool(
   }
 
   if (toolName === "issue.delivery_progress") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const issueId = readRequiredString(args, "issueId");
     const progress = await callTrpc<IssueDeliveryProgress>(
       "issue.deliveryProgress",
@@ -6367,7 +6861,7 @@ async function runTool(
   }
 
   if (toolName === "issue.wait_delivery") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const issueId = readRequiredString(args, "issueId");
     const timeoutMs = Math.max(1_000, Math.min(300_000, Math.trunc(readOptionalNumber(args, "timeoutMs") ?? 60_000)));
     const pollIntervalMs = Math.max(250, Math.min(10_000, Math.trunc(readOptionalNumber(args, "pollIntervalMs") ?? 2_000)));
@@ -6412,7 +6906,7 @@ async function runTool(
   }
 
   if (toolName === "analytics.poll_results") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const issueId = readRequiredString(args, "issueId");
     const analytics = await callTrpc<IssuePollResults>(
       "issue.pollResults",
@@ -6433,7 +6927,7 @@ async function runTool(
   }
 
   if (toolName === "analytics.issue_performance") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const issueId = readRequiredString(args, "issueId");
     const range = readIssueAnalyticsRange(args, "range") ?? DEFAULT_ISSUE_ANALYTICS_RANGE;
     const analytics = await callTrpc<IssueAnalytics>(
@@ -6454,7 +6948,7 @@ async function runTool(
   }
 
   if (toolName === "analytics.issue_export_csv") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const issueId = readRequiredString(args, "issueId");
     const range = readIssueAnalyticsRange(args, "range") ?? DEFAULT_ISSUE_ANALYTICS_RANGE;
     const exportType = readIssueAnalyticsExportType(args, "exportType") ?? "combined";
@@ -6477,7 +6971,7 @@ async function runTool(
   }
 
   if (toolName === "analytics.issue_export_performance_csv") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const issueId = readRequiredString(args, "issueId");
     const range = readIssueAnalyticsRange(args, "range") ?? DEFAULT_ISSUE_ANALYTICS_RANGE;
     const exported = await callTrpc<IssueAnalyticsCsv>(
@@ -6499,7 +6993,7 @@ async function runTool(
   }
 
   if (toolName === "analytics.issue_export_polls_csv") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const issueId = readRequiredString(args, "issueId");
     const range = readIssueAnalyticsRange(args, "range") ?? DEFAULT_ISSUE_ANALYTICS_RANGE;
     const exported = await callTrpc<IssueAnalyticsCsv>(
@@ -6521,7 +7015,7 @@ async function runTool(
   }
 
   if (toolName === "analytics.issue_trend") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const issueId = readRequiredString(args, "issueId");
     const range = readIssueAnalyticsRange(args, "range") ?? DEFAULT_ISSUE_ANALYTICS_RANGE;
     const trend = await callTrpc<IssueAnalyticsTrend>(
@@ -6654,7 +7148,7 @@ async function runTool(
         return makeToolResult(
           `Issue ${issue.id} send-and-wait finished with status ${progress.status}: ${progress.delivery.processed}/${progress.delivery.total} processed (${progress.delivery.completionPercent}%)`,
           {
-            issue,
+            issue: issueStateAfterProgress(issue, progress),
             timedOut: false,
             elapsedMs: Date.now() - startedAt,
             progress
@@ -6667,7 +7161,7 @@ async function runTool(
         return makeToolResult(
           `Issue ${issue.id} queued but still ${progress.status} after ${elapsedMs}ms`,
           {
-            issue,
+            issue: issueStateAfterProgress(issue, progress),
             timedOut: true,
             elapsedMs,
             progress
@@ -6680,7 +7174,7 @@ async function runTool(
   }
 
   if (toolName === "ai.generate_draft") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const prompt = readRequiredString(args, "prompt");
     const tone = asOptionalString(args.tone);
 
@@ -6698,11 +7192,17 @@ async function runTool(
       options
     );
 
-    return makeToolResult("AI draft generated", draft);
+    // Honest about what this is (user-testing 0924a, mcp/F13): the server
+    // returns a fixed scaffold with no model call, and it used to come back as
+    // "AI draft generated", which an agent reasonably took as finished copy.
+    return makeToolResult(
+      "Scaffold only: no AI model ran and nothing was saved. Write the email yourself and save it with issue.create_draft.",
+      { ...draft, scaffold: true, saved: false, next: "issue.create_draft" }
+    );
   }
 
   if (toolName === "template.create") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const name = readRequiredString(args, "name");
     const html = asOptionalString(args.html);
     const spec = args.spec as Record<string, unknown> | undefined;
@@ -6766,7 +7266,7 @@ async function runTool(
   }
 
   if (toolName === "template.list") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const limit = readOptionalNumber(args, "limit") ?? 20;
 
     const result = await callRestApi<{ data: Array<Record<string, unknown>>; has_more: boolean }>(
@@ -6786,7 +7286,7 @@ async function runTool(
   }
 
   if (toolName === "template.get") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const templateId = readRequiredString(args, "templateId");
 
     const template = await callRestApi<Record<string, unknown>>(
@@ -6803,7 +7303,7 @@ async function runTool(
   }
 
   if (toolName === "template.update") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const templateId = readRequiredString(args, "templateId");
     const name = asOptionalString(args.name);
     const html = asOptionalString(args.html);
@@ -6856,11 +7356,20 @@ async function runTool(
       options
     );
 
-    return makeToolResult(`Template updated: ${template.id}`, { template });
+    // Whether the edit is live is the part an agent most needs, so it is said in
+    // the summary line and not only in the structured `has_unpublished_versions`.
+    return makeToolResult(
+      `Template updated: ${template.id}${
+        template.has_unpublished_versions
+          ? ". Saved, not published yet: automations and the API keep sending the published version until template.publish is called."
+          : ""
+      }`,
+      { template }
+    );
   }
 
   if (toolName === "template.publish") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const templateId = readRequiredString(args, "templateId");
 
     const template = await callRestApi<Record<string, unknown>>(
@@ -6874,7 +7383,7 @@ async function runTool(
   }
 
   if (toolName === "template.unpublish") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const templateId = readRequiredString(args, "templateId");
 
     const template = await callRestApi<Record<string, unknown>>(
@@ -6888,7 +7397,7 @@ async function runTool(
   }
 
   if (toolName === "template.versions") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const templateId = readRequiredString(args, "templateId");
     const limit = readOptionalNumber(args, "limit");
 
@@ -6908,7 +7417,7 @@ async function runTool(
     const lines = result.data.map((version) => {
       const author = version.author as { name?: string; email?: string } | null;
       const who = author?.name ?? author?.email ?? "unknown";
-      return `v${version.version}${version.is_current ? " (current)" : ""}: ${version.origin} by ${who} at ${version.created_at}`;
+      return `v${version.version}${version.is_current ? " (current)" : ""}${version.is_published ? " (published)" : ""}: ${version.origin} by ${who} at ${version.created_at}`;
     });
     return makeToolResult(
       result.data.length > 0
@@ -6919,7 +7428,7 @@ async function runTool(
   }
 
   if (toolName === "template.restore_version") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const templateId = readRequiredString(args, "templateId");
     const version = readOptionalNumber(args, "version");
     if (version === undefined) {
@@ -6943,13 +7452,15 @@ async function runTool(
       options
     );
 
-    // The unpublish is the part a caller most needs to hear about, so it is said
-    // in the summary line as well as reported in the structured `unpublished`.
+    // Whether the restored design is live yet is the part a caller most needs
+    // to hear about, so it is said in the summary line too, not just in the
+    // structured `template.has_unpublished_versions`.
+    const restoredTemplate = result.template as { has_unpublished_versions?: boolean } | undefined;
     return makeToolResult(
       result.restored
         ? `Restored version ${version} onto template ${templateId}. The design it replaced was kept as its own version, so this restore can be undone by restoring the entry above it.${
-            result.unpublished
-              ? " The template is now a DRAFT — automations and the API have STOPPED sending it until template.publish is called again."
+            restoredTemplate?.has_unpublished_versions
+              ? " Your changes are saved but not published: automations and the API keep sending the published version until template.publish is called again."
               : ""
           }`
         : `Nothing restored: ${result.message}`,
@@ -6958,7 +7469,7 @@ async function runTool(
   }
 
   if (toolName === "template.duplicate") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const templateId = readRequiredString(args, "templateId");
 
     const template = await callRestApi<Record<string, unknown>>(
@@ -6972,7 +7483,7 @@ async function runTool(
   }
 
   if (toolName === "template.delete") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const templateId = readRequiredString(args, "templateId");
 
     const result = await callRestApi<{ id: string; deleted: boolean }>(
@@ -7015,16 +7526,22 @@ async function runTool(
     for (const key of EMAIL_SEND_FIELDS) {
       if (args[key] !== undefined) body[key] = args[key];
     }
-    for (const required of ["to", "subject"] as const) {
-      if (body[required] === undefined) {
-        throw new Error(`Missing required field: ${required}`);
-      }
-    }
-    // Exactly one of from / sender_id (mirrors sendEmailSchema's refine in
+    // A template carries its own subject and sender, which the API uses when
+    // the request leaves them out (mirrors sendEmailSchema's refines in
     // packages/contracts). Caught here so an agent gets a clear message before
     // the round-trip instead of a generic 400 from the REST endpoint.
-    if ((body.from === undefined) === (body.sender_id === undefined)) {
+    const templated = body.template !== undefined;
+    if (body.to === undefined) throw new Error("Missing required field: to");
+    if (body.subject === undefined && !templated) {
+      throw new Error("Missing required field: subject (or send a template, whose published subject is used)");
+    }
+    if (body.from !== undefined && body.sender_id !== undefined) {
       throw new Error("Provide exactly one of 'from' or 'sender_id'.");
+    }
+    if (body.from === undefined && body.sender_id === undefined && !templated) {
+      throw new Error(
+        "Provide exactly one of 'from' or 'sender_id', or send a template, whose published sender is used."
+      );
     }
 
     const result = await callRestApi<{ id: string }>(
@@ -7203,7 +7720,7 @@ async function runTool(
 
   // --- Inbound email --------------------------------------------------------
   if (toolName === "email.inbound_list") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const limit = readOptionalNumber(args, "limit");
     const cursor = asOptionalString(args.cursor);
     const params = new URLSearchParams({ publication_id: publicationId });
@@ -7315,7 +7832,7 @@ async function runTool(
 
   // --- Email sending domains -----------------------------------------------
   if (toolName === "domain.create") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const name = readRequiredString(args, "name");
     const purpose = asOptionalString(args.purpose);
     const isPrimary = readOptionalBoolean(args, "is_primary");
@@ -7354,7 +7871,7 @@ async function runTool(
   }
 
   if (toolName === "domain.list") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const limit = readOptionalNumber(args, "limit");
     const params = new URLSearchParams({ publication_id: publicationId });
     if (limit !== undefined) params.set("limit", String(limit));
@@ -7372,7 +7889,7 @@ async function runTool(
   }
 
   if (toolName === "domain.get") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
     const result = await callRestApi<{ id: string; name: string; status: string; records: unknown[] }>(
       "GET",
@@ -7384,7 +7901,7 @@ async function runTool(
   }
 
   if (toolName === "domain.verify") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
     const result = await callRestApi<{ id: string; name: string; status: string }>(
       "POST",
@@ -7396,7 +7913,7 @@ async function runTool(
   }
 
   if (toolName === "domain.update") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
     const purpose = asOptionalString(args.purpose);
     const isPrimary = readOptionalBoolean(args, "is_primary");
@@ -7490,7 +8007,7 @@ async function runTool(
   }
 
   if (toolName === "domain.delete") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
     const result = await callRestApi<{ id: string }>(
       "DELETE",
@@ -7503,7 +8020,7 @@ async function runTool(
 
   // --- Domain claiming ------------------------------------------------------
   if (toolName === "domain.claim") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const name = readRequiredString(args, "name");
     const region = asOptionalString(args.region);
     const result = await callRestApi<{
@@ -7536,7 +8053,7 @@ async function runTool(
   }
 
   if (toolName === "domain.claim_get") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const claimId = readRequiredString(args, "claimId");
     const result = await callRestApi<{
       id: string;
@@ -7559,7 +8076,7 @@ async function runTool(
   }
 
   if (toolName === "domain.claim_verify") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const claimId = readRequiredString(args, "claimId");
     const result = await callRestApi<{
       id: string;
@@ -7586,7 +8103,7 @@ async function runTool(
   }
 
   if (toolName === "domain.claim_cancel") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const claimId = readRequiredString(args, "claimId");
     const result = await callRestApi<{ id: string }>(
       "DELETE",
@@ -7599,7 +8116,7 @@ async function runTool(
 
   // --- Tracking sub-domains -------------------------------------------------
   if (toolName === "domain.tracking_create") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
     const subdomain = readRequiredString(args, "subdomain");
     const result = await callRestApi<{ id: string; full_name: string; status: string }>(
@@ -7615,7 +8132,7 @@ async function runTool(
   }
 
   if (toolName === "domain.tracking_list") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
     const result = await callRestApi<{ data: unknown[] }>(
       "GET",
@@ -7627,7 +8144,7 @@ async function runTool(
   }
 
   if (toolName === "domain.tracking_verify") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
     const trackingDomainId = readRequiredString(args, "trackingDomainId");
     const result = await callRestApi<{ id: string; full_name: string; status: string }>(
@@ -7640,7 +8157,7 @@ async function runTool(
   }
 
   if (toolName === "domain.tracking_delete") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
     const trackingDomainId = readRequiredString(args, "trackingDomainId");
     const result = await callRestApi<{ id: string }>(
@@ -7654,7 +8171,7 @@ async function runTool(
 
   // --- Outbound webhooks ----------------------------------------------------
   if (toolName === "webhook.create") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const endpoint = readRequiredString(args, "endpoint");
     const events = args.events;
     if (!Array.isArray(events) || events.length === 0 || !events.every((e) => typeof e === "string")) {
@@ -7673,7 +8190,7 @@ async function runTool(
   }
 
   if (toolName === "webhook.list") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const limit = readOptionalNumber(args, "limit");
     const params = new URLSearchParams({ publication_id: publicationId });
     if (limit !== undefined) params.set("limit", String(limit));
@@ -7687,7 +8204,7 @@ async function runTool(
   }
 
   if (toolName === "webhook.get") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const webhookId = readRequiredString(args, "webhookId");
     const result = await callRestApi<{ id: string; endpoint: string; status: string }>(
       "GET",
@@ -7699,7 +8216,7 @@ async function runTool(
   }
 
   if (toolName === "webhook.update") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const webhookId = readRequiredString(args, "webhookId");
     const endpoint = asOptionalString(args.endpoint);
     const status = asOptionalString(args.status);
@@ -7724,7 +8241,7 @@ async function runTool(
   }
 
   if (toolName === "webhook.delete") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const webhookId = readRequiredString(args, "webhookId");
     const result = await callRestApi<{ id: string }>(
       "DELETE",
@@ -7737,7 +8254,7 @@ async function runTool(
 
   // --- Audience segments ----------------------------------------------------
   if (toolName === "segment.create") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const name = readRequiredString(args, "name");
     const description = asOptionalString(args.description);
     const statusFilter = asOptionalString(args.status_filter);
@@ -7758,7 +8275,7 @@ async function runTool(
   }
 
   if (toolName === "segment.list") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const limit = readOptionalNumber(args, "limit");
     const params = new URLSearchParams({ publication_id: publicationId });
     if (limit !== undefined) params.set("limit", String(limit));
@@ -7772,7 +8289,7 @@ async function runTool(
   }
 
   if (toolName === "segment.get") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const segmentId = readRequiredString(args, "segmentId");
     const result = await callRestApi<{ id: string; name: string }>(
       "GET",
@@ -7784,7 +8301,7 @@ async function runTool(
   }
 
   if (toolName === "segment.update") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const segmentId = readRequiredString(args, "segmentId");
     const name = asOptionalString(args.name);
     const description = asOptionalString(args.description);
@@ -7806,7 +8323,7 @@ async function runTool(
   }
 
   if (toolName === "segment.delete") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const segmentId = readRequiredString(args, "segmentId");
     const result = await callRestApi<{ id: string }>(
       "DELETE",
@@ -7881,7 +8398,7 @@ async function runTool(
 
   // --- Contact completeness -------------------------------------------------
   if (toolName === "contact.get") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const idOrEmail = readRequiredString(args, "idOrEmail");
     const result = await callRestApi<{ id: string; email: string; status: string }>(
       "GET",
@@ -7893,7 +8410,7 @@ async function runTool(
   }
 
   if (toolName === "contact.delete") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const idOrEmail = readRequiredString(args, "idOrEmail");
     const result = await callRestApi<{ id: string }>(
       "DELETE",
@@ -7905,7 +8422,7 @@ async function runTool(
   }
 
   if (toolName === "contact.get_properties") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const contactId = readRequiredString(args, "contactId");
     const result = await callTrpc<unknown>(
       "contact.getPropertyValues",
@@ -7917,7 +8434,7 @@ async function runTool(
   }
 
   if (toolName === "contact.set_properties") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const contactId = readRequiredString(args, "contactId");
     const values = args.values;
     if (!Array.isArray(values) || values.length === 0) {
@@ -7937,7 +8454,7 @@ async function runTool(
 
   // --- Topic definitions ----------------------------------------------------
   if (toolName === "topic.create") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const name = readRequiredString(args, "name");
     const defaultSubscription = asOptionalString(args.default_subscription);
     if (defaultSubscription !== "opt_in" && defaultSubscription !== "opt_out") {
@@ -7961,7 +8478,7 @@ async function runTool(
   }
 
   if (toolName === "topic.list") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const limit = readOptionalNumber(args, "limit");
     const params = new URLSearchParams({ publication_id: publicationId });
     if (limit !== undefined) params.set("limit", String(limit));
@@ -7975,7 +8492,7 @@ async function runTool(
   }
 
   if (toolName === "topic.update") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const topicId = readRequiredString(args, "topicId");
     const name = asOptionalString(args.name);
     const description = asOptionalString(args.description);
@@ -7996,7 +8513,7 @@ async function runTool(
   }
 
   if (toolName === "topic.delete") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const topicId = readRequiredString(args, "topicId");
     const result = await callRestApi<{ id: string }>(
       "DELETE",
@@ -8053,7 +8570,7 @@ async function runTool(
 
   // --- Automations & events (snake_case arguments on purpose) ---------------
   if (toolName === "automation.create") {
-    const publicationId = readPublicationId(args, options, "publication_id");
+    const publicationId = await readPublicationId(args, options, "publication_id");
     const name = readRequiredString(args, "name");
     const steps = readRequiredJsonObjectArray(args, "steps");
     const connections = readOptionalJsonObjectArray(args, "connections");
@@ -8102,7 +8619,7 @@ async function runTool(
   }
 
   if (toolName === "automation.list") {
-    const publicationId = readPublicationId(args, options, "publication_id");
+    const publicationId = await readPublicationId(args, options, "publication_id");
     const status = asOptionalString(args.status);
     const limit = readOptionalNumber(args, "limit");
     const after = asOptionalString(args.after);
@@ -8134,7 +8651,7 @@ async function runTool(
   }
 
   if (toolName === "automation.get") {
-    const publicationId = readPublicationId(args, options, "publication_id");
+    const publicationId = await readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
 
     const automation = await callAutomationApi<AutomationResponse>(
@@ -8154,7 +8671,7 @@ async function runTool(
   }
 
   if (toolName === "automation.update") {
-    const publicationId = readPublicationId(args, options, "publication_id");
+    const publicationId = await readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
     const name = asOptionalString(args.name);
     const steps = readOptionalJsonObjectArray(args, "steps");
@@ -8204,7 +8721,7 @@ async function runTool(
   }
 
   if (toolName === "automation.validate") {
-    const publicationId = readPublicationId(args, options, "publication_id");
+    const publicationId = await readPublicationId(args, options, "publication_id");
     const steps = readRequiredJsonObjectArray(args, "steps");
     const connections = readOptionalJsonObjectArray(args, "connections");
 
@@ -8223,7 +8740,7 @@ async function runTool(
   }
 
   if (toolName === "automation.enable") {
-    const publicationId = readPublicationId(args, options, "publication_id");
+    const publicationId = await readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
 
     const automation = await callAutomationApi<AutomationResponse>(
@@ -8242,7 +8759,7 @@ async function runTool(
   }
 
   if (toolName === "automation.disable") {
-    const publicationId = readPublicationId(args, options, "publication_id");
+    const publicationId = await readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
     const cancelRuns = readOptionalBoolean(args, "cancel_runs");
 
@@ -8262,7 +8779,7 @@ async function runTool(
   }
 
   if (toolName === "automation.archive") {
-    const publicationId = readPublicationId(args, options, "publication_id");
+    const publicationId = await readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
     const cancelRuns = readOptionalBoolean(args, "cancel_runs");
 
@@ -8282,7 +8799,7 @@ async function runTool(
   }
 
   if (toolName === "automation.delete") {
-    const publicationId = readPublicationId(args, options, "publication_id");
+    const publicationId = await readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
 
     const result = await callAutomationApi<{ id: string; deleted: boolean }>(
@@ -8298,7 +8815,7 @@ async function runTool(
   }
 
   if (toolName === "automation.versions") {
-    const publicationId = readPublicationId(args, options, "publication_id");
+    const publicationId = await readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
     const limit = readOptionalNumber(args, "limit");
     const after = asOptionalString(args.after);
@@ -8330,7 +8847,7 @@ async function runTool(
   }
 
   if (toolName === "automation.version") {
-    const publicationId = readPublicationId(args, options, "publication_id");
+    const publicationId = await readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
     const version = readOptionalNumber(args, "version");
     if (version === undefined) {
@@ -8355,7 +8872,7 @@ async function runTool(
   }
 
   if (toolName === "automation.metrics") {
-    const publicationId = readPublicationId(args, options, "publication_id");
+    const publicationId = await readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
     const version = readOptionalNumber(args, "version");
     const since = asOptionalString(args.since);
@@ -8393,7 +8910,7 @@ async function runTool(
   }
 
   if (toolName === "automation_run.list") {
-    const publicationId = readPublicationId(args, options, "publication_id");
+    const publicationId = await readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
     const status = asOptionalString(args.status);
     const contactId = asOptionalString(args.contact_id);
@@ -8431,7 +8948,7 @@ async function runTool(
   }
 
   if (toolName === "automation_run.get") {
-    const publicationId = readPublicationId(args, options, "publication_id");
+    const publicationId = await readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
     const runId = readRequiredString(args, "run_id");
 
@@ -8458,7 +8975,7 @@ async function runTool(
   }
 
   if (toolName === "automation_run.cancel") {
-    const publicationId = readPublicationId(args, options, "publication_id");
+    const publicationId = await readPublicationId(args, options, "publication_id");
     const automationId = readRequiredString(args, "automation_id");
     const runId = readRequiredString(args, "run_id");
 
@@ -8476,7 +8993,7 @@ async function runTool(
   }
 
   if (toolName === "event.send") {
-    const publicationId = readPublicationId(args, options, "publication_id");
+    const publicationId = await readPublicationId(args, options, "publication_id");
     const eventName = readRequiredString(args, "event_name");
     const contactId = asOptionalString(args.contact_id);
     const email = asOptionalString(args.email);
@@ -8522,7 +9039,7 @@ async function runTool(
   }
 
   if (toolName === "event_definition.list") {
-    const publicationId = readPublicationId(args, options, "publication_id");
+    const publicationId = await readPublicationId(args, options, "publication_id");
     const limit = readOptionalNumber(args, "limit");
     const after = asOptionalString(args.after);
 
@@ -8552,7 +9069,7 @@ async function runTool(
   }
 
   if (toolName === "event_definition.get") {
-    const publicationId = readPublicationId(args, options, "publication_id");
+    const publicationId = await readPublicationId(args, options, "publication_id");
     const definitionId = readRequiredString(args, "definition_id");
 
     const definition = await callAutomationApi<Record<string, unknown>>(
@@ -8577,7 +9094,7 @@ async function runTool(
   }
 
   if (toolName === "event_definition.create") {
-    const publicationId = readPublicationId(args, options, "publication_id");
+    const publicationId = await readPublicationId(args, options, "publication_id");
     const eventName = readRequiredString(args, "event_name");
     const description = asOptionalString(args.description);
     // Nothing is stored yet, so null and absent both mean "no schema" here.
@@ -8602,7 +9119,7 @@ async function runTool(
   }
 
   if (toolName === "event_definition.update") {
-    const publicationId = readPublicationId(args, options, "publication_id");
+    const publicationId = await readPublicationId(args, options, "publication_id");
     const definitionId = readRequiredString(args, "definition_id");
     const description = asOptionalString(args.description);
     const schemaJson = readNullableJsonObject(args, "schema_json");
@@ -8629,7 +9146,7 @@ async function runTool(
   }
 
   if (toolName === "event_definition.delete") {
-    const publicationId = readPublicationId(args, options, "publication_id");
+    const publicationId = await readPublicationId(args, options, "publication_id");
     const definitionId = readRequiredString(args, "definition_id");
 
     const result = await callAutomationApi<{ id: string; deleted: boolean }>(
@@ -8655,7 +9172,7 @@ async function runTool(
   // "Insufficient role" back from the tRPC call.
 
   if (toolName === "site.get") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
 
     const site = await callTrpc<SiteSettingsRecord>(
       "publication.siteSettings",
@@ -8683,7 +9200,7 @@ async function runTool(
   }
 
   if (toolName === "site.pages_list") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
 
     const result = await callTrpc<{ pages: SitePageRecord[] }>(
       "publication.sitePages",
@@ -8711,7 +9228,7 @@ async function runTool(
   }
 
   if (toolName === "site.page_get") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const pageId = asOptionalString(args.pageId);
     const slug = asOptionalString(args.slug);
     const kind = asOptionalString(args.kind);
@@ -8766,7 +9283,7 @@ async function runTool(
   }
 
   if (toolName === "site.page_upsert") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const kind = readRequiredString(args, "kind");
     const slug = readRequiredString(args, "slug");
     const title = readRequiredString(args, "title");
@@ -8809,7 +9326,7 @@ async function runTool(
   }
 
   if (toolName === "site.apply_ops") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const pageId = asOptionalString(args.pageId);
     const slug = asOptionalString(args.slug);
     const ops = readRequiredJsonObjectArray(args, "ops");
@@ -8859,7 +9376,7 @@ async function runTool(
   }
 
   if (toolName === "site.section_templates_list") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
 
     const result = await callTrpc<{ templates: SiteTemplateRecord[] }>(
       "publication.siteSectionTemplates",
@@ -8875,7 +9392,7 @@ async function runTool(
   }
 
   if (toolName === "site.footer_templates_list") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const result = await callTrpc<{
       templates: Array<{ id: string; name: string; description: string }>;
     }>("publication.siteFooterTemplates", { publicationId }, options, "query");
@@ -8887,7 +9404,7 @@ async function runTool(
   }
 
   if (toolName === "site.navbar_templates_list") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const result = await callTrpc<{
       templates: Array<{
         id: string;
@@ -8904,7 +9421,7 @@ async function runTool(
   }
 
   if (toolName === "site.design_brief_get") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
 
     const site = await callTrpc<SiteSettingsRecord>(
       "publication.siteSettings",
@@ -8922,7 +9439,7 @@ async function runTool(
   }
 
   if (toolName === "site.design_brief_set") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     // Three-state on purpose: null clears the brief, a string replaces it.
     const designBrief = readNullableString(args, "designBrief");
     if (designBrief === undefined) {
@@ -8946,7 +9463,7 @@ async function runTool(
   }
 
   if (toolName === "site.publish") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
 
     const result = await callTrpc<{
       publishedAt: string;
@@ -8966,7 +9483,7 @@ async function runTool(
   }
 
   if (toolName === "site.discard_draft") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
 
     const result = await callTrpc<{ draftVersion: number; pages: SitePageRecord[] }>(
       "publication.siteDiscardDraft",
@@ -8985,7 +9502,7 @@ async function runTool(
   }
 
   if (toolName === "site.asset_list") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const search = asOptionalString(args.search);
     const requestedLimit = readOptionalNumber(args, "limit");
     const limit = Math.max(1, Math.min(200, Math.trunc(requestedLimit ?? 50)));
@@ -9006,7 +9523,7 @@ async function runTool(
   }
 
   if (toolName === "site.asset_upload") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const contentType = readRequiredString(args, "contentType");
     const dataBase64 = readRequiredString(args, "dataBase64");
     const fileName = asOptionalString(args.fileName);
@@ -9043,7 +9560,7 @@ async function runTool(
   }
 
   if (toolName === "site.asset_delete") {
-    const publicationId = readPublicationId(args, options);
+    const publicationId = await readPublicationId(args, options);
     const assetId = readRequiredString(args, "assetId");
 
     const result = await callTrpc<{ deleted: boolean }>(
@@ -9190,16 +9707,51 @@ async function readResource(uri: string, options: McpRuntimeOptions) {
   throw new Error(`Unknown resource: ${uri}`);
 }
 
-function readPrompt(name: string) {
+/**
+ * The two prompts take arguments and put them in the message (user-testing
+ * 0924a, mcp/F13). They used to declare none and return fixed text, so a brief
+ * passed to newsletter.draft_from_brief was silently thrown away.
+ *
+ * A missing required argument is NOT an error: clients that predate the
+ * arguments call prompts/get with none, and they get a message that asks for
+ * the brief instead of a failure. A value that is present but unusable is
+ * refused as invalid params.
+ */
+function readPrompt(name: string, rawArguments: Record<string, unknown>) {
+  const argument = (key: string): string | undefined => {
+    const value = rawArguments[key];
+    if (typeof value === "number") return String(value);
+    return asOptionalString(value);
+  };
+
   if (name === "newsletter.draft_from_brief") {
+    const brief = argument("brief");
+    const audience = argument("audience");
+    const tone = argument("tone");
+    const callToAction = argument("call_to_action");
+
+    const context = [
+      brief ? `Brief: ${brief}` : "Brief: not given yet. Ask me what the email is about before you write anything.",
+      audience ? `Audience: ${audience}` : null,
+      tone ? `Tone: ${tone}` : null,
+      callToAction ? `Call to action: ${callToAction}` : null
+    ].filter((line): line is string => line !== null);
+
     return {
-      description: "Create a newsletter draft from a short brief",
+      description: "Write a newsletter email from a short brief, then save it as a draft",
       messages: [
         {
           role: "user",
           content: {
             type: "text",
-            text: "Write a concise newsletter with clear sections and one CTA."
+            text: [
+              "Write a newsletter email from this brief.",
+              "",
+              ...context,
+              "",
+              "Keep it concise: a subject line, a preview text that says something the subject does not, two to four short sections with clear headings, and exactly one call to action.",
+              "Then save it as a draft with issue.create_draft (contentSpec or contentHtml), check it with email.lint, and show me the subject and a short summary. Do not send it."
+            ].join("\n")
           }
         }
       ]
@@ -9207,21 +9759,42 @@ function readPrompt(name: string) {
   }
 
   if (name === "newsletter.subject_line_pack") {
+    const topic = argument("topic");
+    const audience = argument("audience");
+    const countText = argument("count");
+    let count = 10;
+    if (countText !== undefined) {
+      const parsed = Number(countText);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 30) {
+        throw new InvalidParamsError("Prompt argument count must be a whole number from 1 to 30");
+      }
+      count = parsed;
+    }
+
     return {
-      description: "Generate subject line variants",
+      description: "Write subject line and preview text pairs for an email",
       messages: [
         {
           role: "user",
           content: {
             type: "text",
-            text: "Generate 10 subject lines with varied tone and urgency."
+            text: [
+              topic
+                ? `Write ${count} subject lines for an email about: ${topic}`
+                : `Write ${count} subject lines for an email. Ask me what the email is about first.`,
+              audience ? `Audience: ${audience}` : null,
+              "",
+              "Vary the tone and the urgency. Keep each one under 60 characters, with no all caps and no misleading urgency. Give each a preview text that adds something the subject does not say. Return them as a numbered list."
+            ]
+              .filter((line): line is string => line !== null)
+              .join("\n")
           }
         }
       ]
     };
   }
 
-  throw new Error(`Unknown prompt: ${name}`);
+  throw new InvalidParamsError(`Unknown prompt: ${name}`);
 }
 
 export async function handleMcpRequest(
@@ -9270,7 +9843,7 @@ export async function handleMcpRequest(
           return error(id, -32602, "Missing required param: name");
         }
 
-        return response(id, readPrompt(promptName));
+        return response(id, readPrompt(promptName, asObject(request.params?.arguments)));
       }
 
       case "tools/call": {
@@ -9289,7 +9862,26 @@ export async function handleMcpRequest(
         }
 
         const args = (argumentsValue ?? {}) as Record<string, unknown>;
-        const result = await runTool(toolName, args, options);
+        const warning = unknownArgumentsWarning(toolName, args);
+        let result: Awaited<ReturnType<typeof runTool>>;
+        try {
+          result = await runTool(toolName, args, options);
+        } catch (err) {
+          // A failure is often CAUSED by the ignored key (publication_id sent
+          // to a camelCase tool, say), so the error names it too.
+          if (warning && err instanceof Error) {
+            err.message = `${err.message}\n${warning}`;
+          }
+          throw err;
+        }
+        if (warning && result && Array.isArray((result as { content?: unknown }).content)) {
+          // A separate content item, never appended to the first: some tools
+          // return machine-readable text there (a CSV export, say).
+          (result as { content: Array<{ type: string; text: string }> }).content.push({
+            type: "text",
+            text: `Warning: ${warning}`
+          });
+        }
         return response(id, result);
       }
 
@@ -9305,6 +9897,12 @@ export async function handleMcpRequest(
         return error(id, -32601, "Method not found", { method: request.method });
     }
   } catch (err) {
-    return error(id, -32000, toErrorMessage(err));
+    if (err instanceof InvalidParamsError) {
+      return error(id, -32602, err.message);
+    }
+    // A REST failure carries its machine-readable fields (code, reason, steps,
+    // issues) as `data`, so a client that reads structure need not parse text.
+    const data = err instanceof Error ? (err as Error & { data?: unknown }).data : undefined;
+    return error(id, -32000, toErrorMessage(err), data);
   }
 }

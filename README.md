@@ -20,7 +20,7 @@ The server defaults to the Mailtea cloud API. Self-hosting or running locally? A
 
 ### Which publication a tool acts on
 
-`publicationId` (spelled `publication_id` on the automation and event tools) is **optional** everywhere. Left out, it resolves to the publication the connection is already for: the one chosen on the consent screen after a browser sign-in, the one a publication-scoped API key was minted for, or `MAILTEA_PUBLICATION_ID` over stdio. Pass it explicitly when your credential reaches more than one publication. An explicit id is never widened — a credential scoped to one publication is still refused for any other.
+`publicationId` (spelled `publication_id` on the automation and event tools) is **optional** everywhere. Left out, it resolves to the publication the connection is already for: the one chosen on the consent screen after a browser sign-in, the one a publication-scoped API key was minted for, or `MAILTEA_PUBLICATION_ID` over stdio. A team-scoped personal API key (the default key Studio creates) uses the one publication its owner belongs to in the key's team, when there is exactly one; a service key takes no such default. Pass it explicitly when your credential reaches more than one publication; the error then lists the ids it can take. An explicit id is never widened: a credential scoped to one publication is still refused for any other.
 
 ## Tool families
 
@@ -28,7 +28,7 @@ The server defaults to the Mailtea cloud API. Self-hosting or running locally? A
 - `email.inbound_*` — received email: `inbound_list`, `inbound_get`, `inbound_list_attachments`, `inbound_get_attachment`, `inbound_reply` (auto-threaded; all but `inbound_list` resolve the publication from the email id, so they take no `publicationId` at all)
 - `auth.*`
 - `issue.*` — newsletter drafts + sends to the whole list, plus `publish_to_web` / `unpublish_from_web`
-- `template.*` — reusable email templates: `create`, `list`, `get`, `update`, `publish`, `duplicate`, `delete`, plus `versions` / `restore_version` (a restore is a content write, so it returns the template to draft)
+- `template.*`: reusable email templates: `create`, `list`, `get`, `update`, `publish`, `unpublish`, `duplicate`, `delete`, plus `versions` / `restore_version`. Editing or restoring a published template no longer returns it to draft: the change, From and Reply-To included, is saved as a working copy (`has_unpublished_versions: true`) and the published version keeps sending until `publish` is called again. In `versions`, `is_current` marks the entry matching the working copy and `is_published` the one that is sending. `unpublish` is now the only way to stop a published template sending, short of deleting it
 - `publication.*`
 - `domain.*` — sending domains: add, read DNS records, verify, then send from it; `claim` / `claim_get` / `claim_verify` / `claim_cancel` take over a domain another publication holds by proving DNS control
 - `contact.*` — incl. `get`, `delete`, `get_properties`, `set_properties`. `import_csv` takes `enrollInAutomations` to put the imported contacts through matching `contact.created` / `contact.subscribed` automations — how an imported list starts a welcome series. It defaults to **false**, the same default as Studio's import checkbox. Above 500 rows it also needs `confirmLargeEnrollment: true` — the same acknowledgement a Studio operator gives on the confirm screen — or the import is refused with `enrollment_too_large` and stores nothing
@@ -39,7 +39,7 @@ The server defaults to the Mailtea cloud API. Self-hosting or running locally? A
 - `api_key.*` — manage API keys (requires `settings:write`). `api_key.create` takes `mode: "test"` to mint a test key
 - `analytics.*`
 - `section.*`
-- `automation.*` — multi-step contact journeys: `create`, `list`, `get`, `update`, `enable`, `disable`, `archive`, `delete`, `validate`, `metrics`. An automation is a versioned graph of `steps` + `connections`, so an agent can author one as data. `connections` is optional (steps link in array order) and becomes required only when the graph branches; `validate_only: true` on `create`/`update` is a dry run returning the same coded `issues[]` a real failure returns, so an agent can self-correct before committing. These tools take **snake_case** arguments, unlike the older camelCase tools — the graph payload is snake_case throughout and mixing the two inside one payload is a trap
+- `automation.*`: multi-step contact journeys: `create`, `list`, `get`, `update`, `enable`, `disable`, `archive`, `delete`, `validate`, `metrics`. An automation is a versioned graph of `steps` + `connections`, so an agent can author one as data. `connections` is optional (steps link in array order) and becomes required only when the graph branches; `validate_only: true` on `create`/`update` is a dry run returning the same coded `issues[]` a real failure returns, so an agent can self-correct before committing. On an active automation, `update` is refused only when it adds an error the live version does not already have (`active_graph_invalid`), and changing its trigger needs a pause first (`trigger_locked_while_active`). These tools take **snake_case** arguments, unlike the older camelCase tools, because the graph payload is snake_case throughout and mixing the two inside one payload is a trap
 - `automation_run.*` — `list`, `get`, `cancel`. Run detail returns the graph the run is pinned to, not the live one
 - `event.*` / `event_definition.*` — `event.send` for custom event ingest (opt-in `create_contact`, `idempotency_key`, fan-out counts in the reply), plus `event_definition.list / get / create / update`
 
@@ -53,8 +53,12 @@ Current resources:
 
 Current prompts:
 
-- `newsletter.draft_from_brief`
-- `newsletter.subject_line_pack`
+- `newsletter.draft_from_brief`: arguments `brief` (required), `audience`, `tone`, `call_to_action`
+- `newsletter.subject_line_pack`: arguments `topic` (required), `count` (1 to 30, default 10), `audience`
+
+`ai.generate_draft` returns a placeholder scaffold, not written copy: no AI model runs on Mailtea's side. Write the email yourself and save it with `issue.create_draft`.
+
+A tool that receives an argument it does not declare still runs, and its result adds a `Warning: Ignored unknown argument` item naming what it accepts.
 
 ## Build
 
