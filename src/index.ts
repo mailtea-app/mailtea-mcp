@@ -1842,7 +1842,7 @@ export const MCP_TOOLS = [
   {
     name: "issue.update_draft",
     description:
-      "Update an existing draft issue. Only the fields you pass change: pass title to change the subject, name to rename the post, from/replyTo to set its sender headers, or contentHtml/contentSpec to replace the whole document (use issue.apply_ops for targeted edits).",
+      "Update an existing draft issue. Only the fields you pass change: pass title to change the subject, name to rename the post, from/replyTo to set its sender headers, or contentHtml/contentSpec to replace the whole document (use issue.apply_ops for targeted edits). Pass baseUpdatedAt (from issue.get_editor) so your write never overwrites a change someone made since; on a 'changed elsewhere' conflict, re-read with issue.get_editor and retry. A draft replaced with contentHtml stays HTML: the Visual Email Designer shows it read-only until the operator chooses Edit as blocks, and opening it changes nothing.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1858,6 +1858,12 @@ export const MCP_TOOLS = [
             elements: { type: "object" }
           },
           required: ["root", "elements"]
+        },
+        baseUpdatedAt: {
+          type: "string",
+          format: "date-time",
+          description:
+            "The draft's `updatedAt` as you read it (issue.get_editor, or your last write). Read first, then send it: the update is applied only if nobody changed the draft since (a person typing in the Visual Email Designer, another agent). Otherwise it fails with a 'changed elsewhere' conflict and NOTHING is saved; on that, call issue.get_editor again, re-apply your change to what it returns, and retry with the new updatedAt. Never resend the same body unchanged. Omit it for an unconditional write that can overwrite someone else's edit."
         }
       },
       required: ["issueId"]
@@ -2827,7 +2833,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "template.update",
-    description: `Update an email template. Pass only the fields to change. Providing spec re-renders email-safe HTML server-side; providing html switches the template to raw HTML; providing editor_doc switches it to format "editor" and re-renders. ${EDITOR_DOC_HELP} Sending html for a template that is ALREADY format "editor" is refused with 400 editor_template_html_not_accepted, since its html is derived and accepting raw html would orphan the design source; send editor_doc instead. The sidecars are sticky: a patch carrying only editor_doc keeps the stored style_profile / mailtea_theme / global_css, and a patch carrying only a sidecar re-bakes the html from the STORED doc, so the rendered email never drifts from the stored styling. Call template.get first to read the current editor_doc. Editing a PUBLISHED template no longer unpublishes it: the change is saved as the working copy and the template keeps its published status and its published version keeps sending, with has_unpublished_versions: true on the response. That includes from, reply_to and style_profile: they are part of the published version too, so a new sender, reply-to address or page style reaches sends only after the next publish. Call template.publish to make the edit live.`,
+    description: `Update an email template. Pass only the fields to change. Providing spec re-renders email-safe HTML server-side; providing html switches the template to raw HTML; providing editor_doc switches it to format "editor" and re-renders. ${EDITOR_DOC_HELP} Sending html for a template that is ALREADY format "editor" is refused with 400 editor_template_html_not_accepted, since its html is derived and accepting raw html would orphan the design source; send editor_doc instead. The sidecars are sticky: a patch carrying only editor_doc keeps the stored style_profile / mailtea_theme / global_css, and a patch carrying only a sidecar re-bakes the html from the STORED doc, so the rendered email never drifts from the stored styling. Call template.get first to read the current editor_doc. Editing a PUBLISHED template no longer unpublishes it: the change is saved as the working copy and the template keeps its published status and its published version keeps sending, with has_unpublished_versions: true on the response. That includes from, reply_to and style_profile: they are part of the published version too, so a new sender, reply-to address or page style reaches sends only after the next publish. Call template.publish to make the edit live. Pass base_revision (the revision from your last read) so your edit never overwrites a change someone made since; on a 409 stale_write, re-read with template.get and retry.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -2867,7 +2873,13 @@ export const MCP_TOOLS = [
         subject: { type: "string" },
         from: { type: "string", description: "Default sender address." },
         reply_to: { type: "string" },
-        variables: TEMPLATE_VARIABLES_SCHEMA
+        variables: TEMPLATE_VARIABLES_SCHEMA,
+        base_revision: {
+          type: "integer",
+          minimum: 0,
+          description:
+            "The template's `revision` as you read it (template.get, template.create, or your last template.update). Read first, then send it: the update is applied only if nobody changed what the template sends since (a person editing it in Mailtea Studio, another agent). Otherwise it fails with code stale_write and NOTHING is saved; on that 409, call template.get again, re-apply your change to what it returns, and retry with the new revision. Never resend the same body unchanged. Omit it for an unconditional write that can overwrite someone else's edit."
+        }
       },
       required: ["templateId"]
     }
@@ -2875,12 +2887,18 @@ export const MCP_TOOLS = [
   {
     name: "template.publish",
     description:
-      "Publish an email template: its saved changes, including from and reply_to, become the version that sends. Only a published template can seed an issue, a post, or an automation's send_email step. Calling this on a template that is ALREADY published is how saved edits go live: editing or restoring a published template no longer publishes automatically (see template.update, template.restore_version). The change is saved with has_unpublished_versions: true, and this call is what promotes it. Reversible with template.unpublish.",
+      "Publish an email template: its saved changes, including from and reply_to, become the version that sends. Only a published template can seed an issue, a post, or an automation's send_email step. Calling this on a template that is ALREADY published is how saved edits go live: editing or restoring a published template no longer publishes automatically (see template.update, template.restore_version). The change is saved with has_unpublished_versions: true, and this call is what promotes it. Reversible with template.unpublish. Pass base_revision to publish only the revision you read, never a change someone made since.",
     inputSchema: {
       type: "object",
       properties: {
         publicationId: PUBLICATION_ID_SCHEMA,
-        templateId: { type: "string" }
+        templateId: { type: "string" },
+        base_revision: {
+          type: "integer",
+          minimum: 0,
+          description:
+            "The template's `revision` as you read it (template.get, or your last template.update). Read first, then send it: the template is published only if nobody changed what it sends since, so you never ship an edit you have not seen. Otherwise it fails with code stale_write and NOTHING is published; on that 409, call template.get again, check the content, and retry with the new revision. Never resend the same request unchanged. Omit it to publish whatever is saved."
+        }
       },
       required: ["templateId"]
     }
@@ -4005,7 +4023,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "automation.update",
-    description: `Update an automation. Pass only the fields to change; passing steps replaces the whole graph and cuts a new version. Fields you omit keep their STORED value, so reentry_window_seconds must be sent as null to clear it. Switching reentry_policy from once_per_window to once or always without doing so fails with "reentry_window_seconds is only valid when reentry_policy is once_per_window" on this and every later call. Saving is never blocked for draft/paused/archived automations: issues ride along informationally. A graph update to an ACTIVE automation is refused with 422 active_graph_invalid only when it adds an error the live version does not already have (issues[] lists just those new ones; issues already live carry pre_existing: true and do not block). Changing the trigger (trigger_type or trigger_key) of an ACTIVE automation is refused with 422 trigger_locked_while_active: pause it first, then change the trigger. ${AUTOMATION_SNAKE_CASE_HELP} ${AUTOMATION_STEP_CONFIG_HELP} ${AUTOMATION_CATALOG_HELP}`,
+    description: `Update an automation. Pass only the fields to change; passing steps replaces the whole graph and cuts a new version. Fields you omit keep their STORED value, so reentry_window_seconds must be sent as null to clear it. Switching reentry_policy from once_per_window to once or always without doing so fails with "reentry_window_seconds is only valid when reentry_policy is once_per_window" on this and every later call. Saving is never blocked for draft/paused/archived automations: issues ride along informationally. A graph update to an ACTIVE automation is refused with 422 active_graph_invalid only when it adds an error the live version does not already have (issues[] lists just those new ones; issues already live carry pre_existing: true and do not block). Changing the trigger (trigger_type or trigger_key) of an ACTIVE automation is refused with 422 trigger_locked_while_active: pause it first, then change the trigger. Pass base_version with steps (the version from your last read) so your graph never overwrites steps someone saved since; on a 409 stale_version, re-read with automation.get and retry. ${AUTOMATION_SNAKE_CASE_HELP} ${AUTOMATION_STEP_CONFIG_HELP} ${AUTOMATION_CATALOG_HELP}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -4027,7 +4045,13 @@ export const MCP_TOOLS = [
             "Re-entry window in seconds. A PATCH merges with the STORED value, so moving off once_per_window means clearing this in the SAME call — pass null. Omitting it keeps the stored window, which the server then rejects against the new policy."
         },
         on_step_failure: { type: "string", enum: ["fail", "continue"] },
-        validate_only: AUTOMATION_VALIDATE_ONLY_SCHEMA
+        validate_only: AUTOMATION_VALIDATE_ONLY_SCHEMA,
+        base_version: {
+          type: "integer",
+          minimum: 1,
+          description:
+            "The automation's `version` as you read it (automation.get, or your last create/update), sent with steps. Read first, then send it: the new steps are saved only if nobody saved a different graph since (a person in the Mailtea Studio builder, another agent). Otherwise it fails with code stale_version, NOTHING is saved and no version is cut; on that 409, call automation.get again, rebuild your change on the steps it returns, and retry with the new version. Never resend the same steps unchanged. Steps identical to the live graph are accepted whatever the version. Ignored without steps. Omit it for an unconditional write that can overwrite someone else's steps."
+        }
       },
       required: ["automation_id"]
     }
@@ -5467,11 +5491,51 @@ function describeRestFailure(payload: unknown, fallback: string): string {
   return message;
 }
 
+/**
+ * A write refused because the resource changed since the agent read it
+ * (`stale_write` / `stale_version`, QA 0924a D2). The REST message names REST
+ * routes; an agent needs the TOOL to re-read with and the argument to retry
+ * with, and must be told not to loop on the same request. Anything else is
+ * rethrown untouched.
+ */
+function rethrowChangedElsewhere(
+  error: unknown,
+  rereadTool: string,
+  tokenArgument: string,
+  currentKey: string
+): never {
+  const data = (error as { data?: Record<string, unknown> } | null)?.data;
+  const code = data?.code;
+  if (code === "stale_write" || code === "stale_version") {
+    const current = data?.[currentKey];
+    const failure = new Error(
+      `Changed elsewhere since you read it, so nothing was saved (code: ${code}). Call ${rereadTool} to re-read it, apply your change to what it returns, and retry with ${tokenArgument} ${
+        current === undefined || current === null ? "from that read" : String(current)
+      }. Do not resend the same request unchanged.`
+    ) as Error & { data?: unknown };
+    failure.data = data;
+    throw failure;
+  }
+  throw error;
+}
+
 /** The machine-readable half of a REST failure, for the JSON-RPC `error.data`. */
 function restFailureData(payload: unknown, status: number): Record<string, unknown> | null {
   const body = asObject(payload);
   const data: Record<string, unknown> = { status };
-  for (const key of ["code", "reason", "steps", "details", "issues", "restriction", "domain"]) {
+  for (const key of [
+    "code",
+    "reason",
+    "steps",
+    "details",
+    "issues",
+    "restriction",
+    "domain",
+    // What a "changed elsewhere" 409 says the resource is at now.
+    "current_revision",
+    "current_version",
+    "current_updated_at"
+  ]) {
     if (body[key] !== undefined) data[key] = body[key];
   }
   return Object.keys(data).length > 1 ? data : null;
@@ -5820,10 +5884,17 @@ async function runTool(
       )
       .join("; ");
 
+    // The paths an agent should use next, when the server sent them: after a
+    // structural op, or when every address missed because the live document
+    // is shaped differently from what issue.get_editor showed.
+    const outlineNote = result.report.outline
+      ? " report.outline is the document as it stands now: take paths from it, not from an earlier issue.get_editor."
+      : "";
     return makeToolResult(
-      skipped.length === 0
+      (skipped.length === 0
         ? `Applied ${result.report.applied}/${ops.length} ops to ${result.issueId}. Pass updatedAt ${result.updatedAt} as baseUpdatedAt on the next write.`
-        : `Applied ${result.report.applied}/${ops.length} ops to ${result.issueId} (updatedAt ${result.updatedAt}). ${skipped.length} SKIPPED — ${summary}`,
+        : `Applied ${result.report.applied}/${ops.length} ops to ${result.issueId} (updatedAt ${result.updatedAt}). ${skipped.length} SKIPPED: ${summary}`) +
+        outlineNote,
       {
         issueId: result.issueId,
         title: result.title,
@@ -5872,6 +5943,7 @@ async function runTool(
 
   if (toolName === "issue.update_draft") {
     const issueId = readRequiredString(args, "issueId");
+    const baseUpdatedAt = asOptionalString(args.baseUpdatedAt);
     const title = asOptionalString(args.title);
     const headers = readPostHeaderArgs(args.name, args.from, args.replyTo);
     const contentHtml = asOptionalString(args.contentHtml);
@@ -5902,10 +5974,20 @@ async function runTool(
                 html: resolvedHtml
               }
             }
-          : {})
+          : {}),
+        ...(baseUpdatedAt ? { baseUpdatedAt } : {})
       },
       options
-    );
+    ).catch((error: unknown) => {
+      // tRPC carries no code over this transport, only the message, which says
+      // "changed elsewhere" for exactly this refusal.
+      if (error instanceof Error && /changed elsewhere/i.test(error.message)) {
+        throw new Error(
+          "This draft was changed elsewhere since you read it, so nothing was saved. Call issue.get_editor to re-read it, apply your change to what it returns, and retry with its updatedAt as baseUpdatedAt. Do not resend the same request unchanged."
+        );
+      }
+      throw error;
+    });
 
     return makeToolResult(`Draft updated: ${draft.id}`, { issue: draft });
   }
@@ -7323,6 +7405,7 @@ async function runTool(
     const replyTo = asOptionalString(args.reply_to);
     const variables = args.variables as Array<{ key: string; type: string; fallback_value?: unknown }> | undefined;
     assertTemplateVariableKeys(variables);
+    const baseRevision = readOptionalNumber(args, "base_revision");
 
     if (editorDoc && html) {
       throw new Error(
@@ -7346,7 +7429,8 @@ async function runTool(
       ...(subject ? { subject } : {}),
       ...(from ? { from } : {}),
       ...(replyTo ? { reply_to: replyTo } : {}),
-      ...(variables ? { variables } : {})
+      ...(variables ? { variables } : {}),
+      ...(baseRevision !== undefined ? { base_revision: baseRevision } : {})
     };
 
     const template = await callRestApi<Record<string, unknown>>(
@@ -7354,6 +7438,8 @@ async function runTool(
       `/v1/templates/${encodeURIComponent(templateId)}?publication_id=${encodeURIComponent(publicationId)}`,
       body,
       options
+    ).catch((error: unknown) =>
+      rethrowChangedElsewhere(error, "template.get", "base_revision", "current_revision")
     );
 
     // Whether the edit is live is the part an agent most needs, so it is said in
@@ -7371,12 +7457,15 @@ async function runTool(
   if (toolName === "template.publish") {
     const publicationId = await readPublicationId(args, options);
     const templateId = readRequiredString(args, "templateId");
+    const baseRevision = readOptionalNumber(args, "base_revision");
 
     const template = await callRestApi<Record<string, unknown>>(
       "POST",
       `/v1/templates/${encodeURIComponent(templateId)}/publish?publication_id=${encodeURIComponent(publicationId)}`,
-      undefined,
+      baseRevision !== undefined ? { base_revision: baseRevision } : undefined,
       options
+    ).catch((error: unknown) =>
+      rethrowChangedElsewhere(error, "template.get", "base_revision", "current_revision")
     );
 
     return makeToolResult(`Template published: ${template.id} (${template.status})`, { template });
@@ -8681,10 +8770,12 @@ async function runTool(
     const reentryWindowSeconds = readNullableNumber(args, "reentry_window_seconds");
     const onStepFailure = asOptionalString(args.on_step_failure);
     const validateOnly = readOptionalBoolean(args, "validate_only");
+    const baseVersion = readOptionalNumber(args, "base_version");
 
     const body: Record<string, unknown> = {
       ...(name ? { name } : {}),
       ...(steps !== undefined ? { steps } : {}),
+      ...(baseVersion !== undefined ? { base_version: baseVersion } : {}),
       // Same rule as create: an omitted `connections` must stay omitted.
       ...(connections !== undefined ? { connections } : {}),
       ...(description ? { description } : {}),
@@ -8705,6 +8796,8 @@ async function runTool(
       }),
       body,
       options
+    ).catch((error: unknown) =>
+      rethrowChangedElsewhere(error, "automation.get", "base_version", "current_version")
     );
 
     if (result.object === "automation_validation") {

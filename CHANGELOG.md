@@ -4,6 +4,27 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
 
+- Added: `template.update` and `template.publish` take `base_revision`, `automation.update` takes
+  `base_version` (with `steps`), and `issue.update_draft` takes `baseUpdatedAt`.
+  Send the value from your last read: the write then lands only if nobody
+  changed the template, automation or draft since, for example a person
+  editing it in Mailtea Studio. Otherwise nothing is saved and the tool fails
+  with `stale_write` or `stale_version` (the post's error says "changed
+  elsewhere"), and the message says which tool to re-read with and what to
+  retry with. Leave the argument out and the write is unconditional, as before.
+  Template responses now carry `revision`; `template.update` and
+  `automation.update` failures carry `current_revision` / `current_version` in
+  the error data.
+- Changed: when every op in an `issue.apply_ops` batch misses its path because
+  the post's live document is shaped differently from what `issue.get_editor`
+  showed, the report now carries `outline` for the live document, and the
+  tool's text says to take paths from it. If the ops reached the live
+  document but could not be saved into the draft yet, the error says not to
+  apply them again.
+- Changed: `issue.apply_ops` on a draft that holds raw HTML now tells you to
+  send a `compose` op or ask the operator to choose Edit as blocks in the
+  Visual Email Designer. Opening the draft no longer converts it.
+
 - Added: `issue.create_draft` and `issue.update_draft` take a post's `name`,
   `from` and `replyTo`. `title` is the subject subscribers see; `name` is only
   the post's internal name in Mailtea Studio and never changes the subject.
