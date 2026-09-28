@@ -2,7 +2,7 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
-## Unreleased
+## 0.18.0 (2026-09-28)
 
 - Added: `template.update` and `template.publish` take `base_revision`, `automation.update` takes
   `base_version` (with `steps`), and `issue.update_draft` takes `baseUpdatedAt`.
