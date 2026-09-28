@@ -2,6 +2,19 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
+## Unreleased
+
+- Changed: template history records the sender. `template.versions` returns
+  each version's `from`, `reply_to` and `sender_recorded` (and shows the
+  sender in its summary line), an update that changes only From or Reply-To
+  records a version (or folds into the open one, like any edit), and
+  `template.restore_version` brings the version's From and Reply-To back with
+  the design. `sender_recorded: false` marks a version recorded before this
+  change: its line says "sender not recorded", and restoring it leaves the
+  current From and Reply-To alone. Both tool descriptions say so. The
+  behaviour comes from the API, so it reaches every MCP version on deploy;
+  this release updates what the tools advertise.
+
 ## 0.18.0 (2026-09-28)
 
 - Added: `template.update` and `template.publish` take `base_revision`, `automation.update` takes

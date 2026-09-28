@@ -2919,7 +2919,7 @@ export const MCP_TOOLS = [
   {
     name: "template.versions",
     description:
-      "List an email template's design history, newest first. Metadata only: one version row carries a whole design document, so the list returns version (integer), origin (\"edit\" | \"publish\" | \"restore\"), restored_from_version, format, name, sealed, is_current, is_published, created_at, updated_at and author (or null), never the document itself. is_current marks the entry that matches the working copy (the saved design you are editing), NOT necessarily what is sending, and not always the newest entry either: a metadata-only update (renaming, retagging) touches the template without recording a version. is_published marks the entry automations and the API are sending now; the two differ while the template has unpublished changes. is_published is false on every entry of a draft, and on every entry of a template published before the field existed until it is published again. The reply also carries retention: { max_versions, coalesce_window_seconds }. Only the newest max_versions per template are kept, and consecutive edits by the SAME author inside the coalesce window collapse into one entry, so this is a history of saved designs, not a keystroke log. Feed a version number to template.restore_version to put that design back.",
+      "List an email template's design history, newest first. Metadata only: one version row carries a whole design document, so the list returns version (integer), origin (\"edit\" | \"publish\" | \"restore\"), restored_from_version, format, name, from, reply_to, sender_recorded, sealed, is_current, is_published, created_at, updated_at and author (or null), never the document itself. from and reply_to are the sender the version holds, and a change to only From or Reply-To records a version (or folds into the open one, like any edit). sender_recorded says what a null means: true, the version had no From or Reply-To and restoring it clears them; false, the version was recorded before versions kept the sender, and restoring it leaves the current ones alone. is_current marks the entry that matches the working copy (the saved design you are editing), NOT necessarily what is sending, and not always the newest entry either: a metadata-only update (renaming, retagging) touches the template without recording a version. is_published marks the entry automations and the API are sending now; the two differ while the template has unpublished changes. is_published is false on every entry of a draft, and on every entry of a template published before the field existed until it is published again. The reply also carries retention: { max_versions, coalesce_window_seconds }. Only the newest max_versions per template are kept, and consecutive edits by the same author through the same channel (Studio, or one API key) inside the coalesce window collapse into one entry, so this is a history of saved designs, not a keystroke log. Feed a version number to template.restore_version to put that design, and its From and Reply-To, back.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2937,7 +2937,7 @@ export const MCP_TOOLS = [
   {
     name: "template.restore_version",
     description:
-      "Put an older design from template.versions back onto the template. ON A LIVE TEMPLATE: restoring is a content write, but it no longer returns the template to draft or stops it sending. The template stays published, the restored design is saved as its working copy (has_unpublished_versions: true on the returned template), and automations, issues and the API keep sending the CURRENTLY PUBLISHED version until template.publish is called to make the restored design live. The unpublished field on the response is kept for older clients and is always false now; read has_unpublished_versions or message instead. History is FORWARD-ONLY: a restore never rewinds, truncates or reorders the list. It first records the design it is about to replace as its own version, then appends the restored design as the new newest version, so a restore is itself undoable: restore the entry directly above the one you just restored. Restoring the design that is already current is a no-op: nothing is written, and the reply is restored: false with reason \"identical\" and unpublished: false. Only the newest versions are kept (see retention on template.versions) and consecutive edits by the same author inside the coalesce window collapse into one entry, so a version can age out of history: asking for one that has returns 404 with code template_version_not_found. Returns { restored, restored_from_version, unpublished, message, template }.",
+      "Put an older design from template.versions back onto the template, with the version's from and reply_to: the From and Reply-To come back too, including a null that clears them. A version with sender_recorded: false was recorded before versions kept the sender and leaves the current From and Reply-To as they are. ON A LIVE TEMPLATE: restoring is a content write, but it no longer returns the template to draft or stops it sending. The template stays published, the restored design is saved as its working copy (has_unpublished_versions: true on the returned template), and automations, issues and the API keep sending the CURRENTLY PUBLISHED version until template.publish is called to make the restored design live. The unpublished field on the response is kept for older clients and is always false now; read has_unpublished_versions or message instead. History is FORWARD-ONLY: a restore never rewinds, truncates or reorders the list. It first records the design it is about to replace as its own version, then appends the restored design as the new newest version, so a restore is itself undoable: restore the entry directly above the one you just restored. Restoring the design that is already current is a no-op: nothing is written, and the reply is restored: false with reason \"identical\" and unpublished: false. Only the newest versions are kept (see retention on template.versions) and consecutive edits by the same author through the same channel (Studio, or one API key) inside the coalesce window collapse into one entry, so a version can age out of history: asking for one that has returns 404 with code template_version_not_found. Returns { restored, restored_from_version, unpublished, message, template }.",
     inputSchema: {
       type: "object",
       properties: {
@@ -7506,7 +7506,20 @@ async function runTool(
     const lines = result.data.map((version) => {
       const author = version.author as { name?: string; email?: string } | null;
       const who = author?.name ?? author?.email ?? "unknown";
-      return `v${version.version}${version.is_current ? " (current)" : ""}${version.is_published ? " (published)" : ""}: ${version.origin} by ${who} at ${version.created_at}`;
+      // The sender, when the version holds one: a sender-only change can be an
+      // entry of its own, and without it two such entries read the same. A
+      // version from before sender history says so, because its missing From
+      // does not mean "none" and a restore of it keeps the current sender.
+      const sender =
+        version.sender_recorded === false
+          ? "sender not recorded"
+          : [
+              typeof version.from === "string" ? `from ${version.from}` : null,
+              typeof version.reply_to === "string" ? `reply-to ${version.reply_to}` : null
+            ]
+              .filter(Boolean)
+              .join(", ");
+      return `v${version.version}${version.is_current ? " (current)" : ""}${version.is_published ? " (published)" : ""}: ${version.origin} by ${who} at ${version.created_at}${sender ? ` (${sender})` : ""}`;
     });
     return makeToolResult(
       result.data.length > 0
