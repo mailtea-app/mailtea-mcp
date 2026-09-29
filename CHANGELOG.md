@@ -2,7 +2,7 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
-## Unreleased
+## 0.19.0 (2026-09-29)
 
 - Changed: template history records the sender. `template.versions` returns
   each version's `from`, `reply_to` and `sender_recorded` (and shows the
