@@ -2,6 +2,33 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
+## Unreleased
+
+- Added: `issue.create_draft` takes `segmentId` and `issue.update_draft` takes
+  `segmentId` (`null` clears it), so an agent can send a post to one audience
+  segment instead of all active contacts. Omitted, a post still goes to all
+  active contacts. The id must be a segment in the post's publication (find it
+  with `segment.list`), or the call is refused. The segment picks the
+  recipients when the post is sent: a filter segment is resolved then, and a
+  send to a segment that cannot be resolved or matches nobody is refused
+  rather than widened to the whole list. An empty, blank or non-string
+  `segmentId` is refused instead of being dropped.
+- Changed: `segment.delete` says, and its error shows, that a segment a
+  draft, scheduled or sending post targets cannot be deleted. The API refuses
+  with `segment_in_use`; the tool error names the posts (also in
+  `error.data.posts`) and says to point them at another segment with
+  `issue.update_draft` or clear it first. Deleting one used to send those
+  posts to everyone.
+- Added: `segment.create` and `segment.update` take `inactive_days` (an
+  integer, 1 to 3650; `null` clears it on update): contacts with no open or
+  click in the last N days, counting contacts who never engaged. It selects
+  the silent cohort for a sunset or re-engagement send, not engaged readers.
+  Engagement tracking is not backfilled, so contacts with no recorded
+  engagement count as inactive, and both tool descriptions say so. The
+  automation step help and the step catalog now name
+  `inactive_days` among the filters that make a segment refuse `segment_add`.
+  Both additions need the API deployed with this change.
+
 ## 0.19.0 (2026-09-29)
 
 - Changed: template history records the sender. `template.versions` returns

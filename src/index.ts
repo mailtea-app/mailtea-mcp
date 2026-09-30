@@ -597,7 +597,7 @@ const DEFAULT_API_BASE_URL = "https://api.mailtea.app";
 
 /** Required/optional `config` keys per step type. Inlined into tool descriptions. */
 const AUTOMATION_STEP_CONFIG_HELP =
-  "Step config by type — trigger: {trigger_type, trigger_key?, filter?}; delay: {duration, unit} (unit: seconds|minutes|hours|days|weeks, max 365 days); condition: {rule}; wait_for_event: {event_name, timeout_seconds, filter?} (max 90 days); send_email: {template_id, sender_id?, subject?, reply_to?, variables?}; topic_add: {topic_id}; topic_remove: {topic_id}; segment_add: {segment_id} (member-list segments only — a segment with a status/query filter is refused with segment_is_filter); segment_remove: {segment_id}; contact_update: {properties}; http_request: {url, method?, headers?, body?, timeout_seconds?}; exit: {reason?}.";
+  "Step config by type. trigger: {trigger_type, trigger_key?, filter?}; delay: {duration, unit} (unit: seconds|minutes|hours|days|weeks, max 365 days); condition: {rule}; wait_for_event: {event_name, timeout_seconds, filter?} (max 90 days); send_email: {template_id, sender_id?, subject?, reply_to?, variables?}; topic_add: {topic_id}; topic_remove: {topic_id}; segment_add: {segment_id} (member-list segments only: a segment with a status_filter, query_filter or inactive_days is refused with segment_is_filter); segment_remove: {segment_id}; contact_update: {properties}; http_request: {url, method?, headers?, body?, timeout_seconds?}; exit: {reason?}.";
 
 /** Trigger catalog, inlined into the graph-authoring tool descriptions. */
 const AUTOMATION_TRIGGER_HELP =
@@ -937,7 +937,7 @@ const AUTOMATION_STEP_TYPE_CATALOG = {
       branches: ["next"],
       side_effecting: true,
       description:
-        "Add the enrolled contact to an audience segment. Only a MEMBER-LIST segment accepts this — one with a status_filter or query_filter resolves its audience from that filter instead, and targeting one is refused with segment_is_filter at save time and again when the step runs."
+        "Add the enrolled contact to an audience segment. Only a MEMBER-LIST segment accepts this. One with a status_filter, query_filter or inactive_days resolves its audience from that filter instead, and targeting one is refused with segment_is_filter at save time and again when the step runs."
     },
     {
       type: "segment_remove",
@@ -1751,6 +1751,21 @@ const POST_HEADER_PROPERTIES = {
   }
 } as const;
 
+/**
+ * Which segment a post goes to, shared by issue.create_draft and
+ * issue.update_draft. The server checks the id belongs to the post's
+ * publication when the tool writes it, and resolves the audience at send time.
+ */
+const POST_SEGMENT_HELP =
+  "The segment picks the recipients when the post is sent, not now: a filter segment (status_filter, query_filter or inactive_days) is resolved at send time, and a member list sends to whoever is on it then. Use segment.list to find an id. It must be a segment in the same publication as the post, or the call is refused.";
+
+/**
+ * `inactive_days` on segment.create and segment.update. It selects the SILENT
+ * cohort (`contacts.last_engaged_at`, migration 0097, not backfilled).
+ */
+const SEGMENT_INACTIVE_DAYS_HELP =
+  "Contacts with no open or click in the last N days (1 to 3650). A contact who never engaged counts as inactive. This selects the SILENT cohort, for a sunset or re-engagement send; it is not an engaged readers filter. Engagement tracking is not backfilled, so contacts with no recorded engagement count as inactive, including some who opened or clicked before tracking began. Setting it makes the segment a filter segment; with status_filter or query_filter, a contact must match all of them.";
+
 export const MCP_TOOLS = [
   {
     name: "auth.me",
@@ -1763,7 +1778,7 @@ export const MCP_TOOLS = [
   {
     name: "issue.create_draft",
     // name/from/replyTo: see POST_HEADER_PROPERTIES.
-    description: "Create a marketing email draft. Set kind to 'newsletter' (default) for recurring content that can publish to the public site, or 'broadcast' for a one-time email-only send (promotion, launch, announcement). Provide content one of three ways: templateId (seed from a published server template's PUBLISHED version; use template.list/template.get to find one, and template.publish first if it has unpublished changes), contentHtml (raw HTML), or contentSpec (json-render spec). Spec is recommended for AI agents; use components: Html, Head, Body, Container, Section, Row, Column, Heading, Text, Link, Button, Image, Hr, Preview, Markdown, MailteaHeader, MailteaFooter, MailteaSpacer, MailteaContentBlock. Seeding from a template fills in the variables you pass (both {{key}} and Visual Email Designer {key} forms) and leaves everything else for the broadcast to fill per recipient: a declared variable you do not pass keeps its fallback_value for recipients with no value, and undeclared tokens like {{contact.first_name}} are left as they are. The draft keeps the template's published page style, is wrapped in that page when it is sent, and has its show-if blocks decided per recipient then. The draft's subject is always the title you pass here, never the template's own subject line. The template's preview text is part of its rendered HTML and does reach the inbox, but the draft's own preview text field stays empty.",
+    description: "Create a marketing email draft. Set kind to 'newsletter' (default) for recurring content that can publish to the public site, or 'broadcast' for a one-time email-only send (promotion, launch, announcement). Provide content one of three ways: templateId (seed from a published server template's PUBLISHED version; use template.list/template.get to find one, and template.publish first if it has unpublished changes), contentHtml (raw HTML), or contentSpec (json-render spec). Spec is recommended for AI agents; use components: Html, Head, Body, Container, Section, Row, Column, Heading, Text, Link, Button, Image, Hr, Preview, Markdown, MailteaHeader, MailteaFooter, MailteaSpacer, MailteaContentBlock. Seeding from a template fills in the variables you pass (both {{key}} and Visual Email Designer {key} forms) and leaves everything else for the broadcast to fill per recipient: a declared variable you do not pass keeps its fallback_value for recipients with no value, and undeclared tokens like {{contact.first_name}} are left as they are. The draft keeps the template's published page style, is wrapped in that page when it is sent, and has its show-if blocks decided per recipient then. The draft's subject is always the title you pass here, never the template's own subject line. The template's preview text is part of its rendered HTML and does reach the inbox, but the draft's own preview text field stays empty. Pass segmentId to send to one audience segment instead of all active contacts.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1771,6 +1786,10 @@ export const MCP_TOOLS = [
         title: { type: "string", description: "The subject line subscribers see." },
         ...POST_HEADER_PROPERTIES,
         kind: { type: "string", enum: ["newsletter", "broadcast"], description: "Email kind. 'newsletter' (default) can publish to the public site; 'broadcast' is one-time email-only." },
+        segmentId: {
+          type: "string",
+          description: `Send this post to one audience segment. Omit it to send to all active contacts in the publication. ${POST_SEGMENT_HELP}`
+        },
         templateId: { type: "string", description: "Seed the draft from a published server template's published version (see template.list). Takes precedence over contentHtml/contentSpec." },
         variables: { type: "object", description: "Key/value map substituted into the template's variable placeholders when templateId is set (both {{key}} and Visual Email Designer {key} forms). Values are HTML-escaped; use {{{key}}} in the template for raw HTML." },
         contentHtml: { type: "string", description: "Raw HTML content (use this OR contentSpec OR templateId)" },
@@ -1842,13 +1861,17 @@ export const MCP_TOOLS = [
   {
     name: "issue.update_draft",
     description:
-      "Update an existing draft issue. Only the fields you pass change: pass title to change the subject, name to rename the post, from/replyTo to set its sender headers, or contentHtml/contentSpec to replace the whole document (use issue.apply_ops for targeted edits). Pass baseUpdatedAt (from issue.get_editor) so your write never overwrites a change someone made since; on a 'changed elsewhere' conflict, re-read with issue.get_editor and retry. A draft replaced with contentHtml stays HTML: the Visual Email Designer shows it read-only until the operator chooses Edit as blocks, and opening it changes nothing.",
+      "Update an existing draft issue. Only the fields you pass change: pass title to change the subject, name to rename the post, from/replyTo to set its sender headers, segmentId to choose its audience (null sends it to all active contacts again), or contentHtml/contentSpec to replace the whole document (use issue.apply_ops for targeted edits). Pass baseUpdatedAt (from issue.get_editor) so your write never overwrites a change someone made since; on a 'changed elsewhere' conflict, re-read with issue.get_editor and retry. A draft replaced with contentHtml stays HTML: the Visual Email Designer shows it read-only until the operator chooses Edit as blocks, and opening it changes nothing.",
     inputSchema: {
       type: "object",
       properties: {
         issueId: { type: "string" },
         title: { type: "string", description: "The subject line subscribers see. Omit to leave it unchanged." },
         ...POST_HEADER_PROPERTIES,
+        segmentId: {
+          type: ["string", "null"],
+          description: `Send this post to one audience segment, or null to clear it so the post goes to all active contacts. Omit to leave it unchanged. ${POST_SEGMENT_HELP}`
+        },
         contentHtml: { type: "string", description: "Raw HTML content (use this OR contentSpec)" },
         contentSpec: {
           type: "object",
@@ -3641,7 +3664,7 @@ export const MCP_TOOLS = [
   {
     name: "segment.create",
     description:
-      "Create a saved audience segment defined by a status filter and/or a query filter (filter-based, not manual membership).",
+      "Create a saved audience segment defined by filters: status_filter, query_filter and/or inactive_days (filter-based, not manual membership).",
     inputSchema: {
       type: "object",
       properties: {
@@ -3649,7 +3672,13 @@ export const MCP_TOOLS = [
         name: { type: "string" },
         description: { type: "string" },
         status_filter: { type: "string", enum: ["active", "unsubscribed", "suppressed"] },
-        query_filter: { type: "string", description: "Search/filter expression over contacts." }
+        query_filter: { type: "string", description: "Search/filter expression over contacts." },
+        inactive_days: {
+          type: "integer",
+          minimum: 1,
+          maximum: 3650,
+          description: SEGMENT_INACTIVE_DAYS_HELP
+        }
       },
       required: ["name"]
     }
@@ -3695,6 +3724,12 @@ export const MCP_TOOLS = [
         query_filter: {
           type: ["string", "null"],
           description: "Search/filter expression, or null to clear it."
+        },
+        inactive_days: {
+          type: ["integer", "null"],
+          minimum: 1,
+          maximum: 3650,
+          description: `${SEGMENT_INACTIVE_DAYS_HELP} Pass null to clear it; omit it to leave it unchanged. A segment with contacts added to it cannot take a filter.`
         }
       },
       required: ["segmentId"]
@@ -3702,7 +3737,8 @@ export const MCP_TOOLS = [
   },
   {
     name: "segment.delete",
-    description: "Delete an audience segment.",
+    description:
+      "Delete an audience segment. A segment that a draft, scheduled or sending post targets cannot be deleted: the call is refused with segment_in_use and lists those posts. Point each draft at another segment with issue.update_draft (segmentId), or pass null there to send it to all active contacts; unschedule a scheduled post first (issue.unschedule). A post that is sending frees the segment when it finishes.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4934,6 +4970,36 @@ function readNullableString(
   return asOptionalString(args[key]);
 }
 
+/**
+ * `segmentId` on the draft tools. Absent means "all active contacts" on
+ * create_draft and "leave it" on update_draft; null clears it, on update_draft
+ * only. Anything else that is not a non-empty string is refused rather than
+ * dropped: dropping it on create_draft would target every active contact and
+ * report success, and on update_draft it would be a silent no-op.
+ */
+function readPostSegmentId(
+  args: Record<string, unknown>,
+  key: string,
+  allowNull: boolean
+): string | null | undefined {
+  const value = args[key];
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (value === null && allowNull) {
+    return null;
+  }
+
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value.trim();
+  }
+
+  throw new Error(
+    `Argument ${key} must be a segment id from segment.list. Omit segmentId to send to all active contacts; pass null on issue.update_draft to clear it.`
+  );
+}
+
 function readOptionalStringArray(
   args: Record<string, unknown>,
   key: string
@@ -5534,7 +5600,9 @@ function restFailureData(payload: unknown, status: number): Record<string, unkno
     // What a "changed elsewhere" 409 says the resource is at now.
     "current_revision",
     "current_version",
-    "current_updated_at"
+    "current_updated_at",
+    // Which posts hold a segment that a segment_in_use 409 refused to delete.
+    "posts"
   ]) {
     if (body[key] !== undefined) data[key] = body[key];
   }
@@ -5794,6 +5862,7 @@ async function runTool(
     const variables = args.variables as Record<string, unknown> | undefined;
     const contentHtml = asOptionalString(args.contentHtml);
     const contentSpec = args.contentSpec as Record<string, unknown> | undefined;
+    const segmentId = readPostSegmentId(args, "segmentId", false);
 
     let resolvedHtml = contentHtml;
     // templateId takes precedence — the server renders it; skip inline content.
@@ -5817,6 +5886,7 @@ async function runTool(
         ...headers,
         ...(Object.keys(headers).length > 0 ? { strictHeaders: true } : {}),
         ...(kind ? { kind } : {}),
+        ...(segmentId ? { segmentId } : {}),
         ...(templateId
           ? { templateId, ...(variables ? { variables } : {}) }
           : resolvedHtml
@@ -5946,6 +6016,9 @@ async function runTool(
     const baseUpdatedAt = asOptionalString(args.baseUpdatedAt);
     const title = asOptionalString(args.title);
     const headers = readPostHeaderArgs(args.name, args.from, args.replyTo);
+    // Three-state: a string targets that segment, null clears it (all active
+    // contacts), absent leaves the post's targeting as it is.
+    const segmentId = readPostSegmentId(args, "segmentId", true);
     const contentHtml = asOptionalString(args.contentHtml);
     const contentSpec = args.contentSpec as Record<string, unknown> | undefined;
 
@@ -5967,6 +6040,7 @@ async function runTool(
         ...(title ? { title } : {}),
         ...headers,
         ...(Object.keys(headers).length > 0 ? { strictHeaders: true } : {}),
+        ...(segmentId !== undefined ? { segmentId } : {}),
         ...(resolvedHtml
           ? {
               contentJson: {
@@ -8361,6 +8435,7 @@ async function runTool(
     const description = asOptionalString(args.description);
     const statusFilter = asOptionalString(args.status_filter);
     const queryFilter = asOptionalString(args.query_filter);
+    const inactiveDays = readOptionalNumber(args, "inactive_days");
     const result = await callRestApi<{ id: string; name: string }>(
       "POST",
       "/v1/segments",
@@ -8369,7 +8444,8 @@ async function runTool(
         name,
         ...(description !== undefined ? { description } : {}),
         ...(statusFilter ? { status_filter: statusFilter } : {}),
-        ...(queryFilter !== undefined ? { query_filter: queryFilter } : {})
+        ...(queryFilter !== undefined ? { query_filter: queryFilter } : {}),
+        ...(inactiveDays !== undefined ? { inactive_days: inactiveDays } : {})
       },
       options
     );
@@ -8407,17 +8483,19 @@ async function runTool(
     const segmentId = readRequiredString(args, "segmentId");
     const name = asOptionalString(args.name);
     const description = asOptionalString(args.description);
+    const inactiveDays = readNullableNumber(args, "inactive_days");
     const result = await callRestApi<{ id: string; name: string }>(
       "PATCH",
       `/v1/segments/${encodeURIComponent(segmentId)}?publication_id=${encodeURIComponent(publicationId)}`,
       {
         ...(name ? { name } : {}),
         ...(description !== undefined ? { description } : {}),
-        // status_filter / query_filter are nullable: forward an explicit null
-        // to CLEAR the filter, a value to set it, and omit the key entirely
-        // (absent from args) to leave it unchanged.
+        // status_filter / query_filter / inactive_days are nullable: forward an
+        // explicit null to CLEAR the filter, a value to set it, and omit the key
+        // entirely (absent from args) to leave it unchanged.
         ...("status_filter" in args ? { status_filter: args.status_filter } : {}),
-        ...("query_filter" in args ? { query_filter: args.query_filter } : {})
+        ...("query_filter" in args ? { query_filter: args.query_filter } : {}),
+        ...(inactiveDays !== undefined ? { inactive_days: inactiveDays } : {})
       },
       options
     );
@@ -8432,7 +8510,20 @@ async function runTool(
       `/v1/segments/${encodeURIComponent(segmentId)}?publication_id=${encodeURIComponent(publicationId)}`,
       undefined,
       options
-    );
+    ).catch((error: unknown) => {
+      // Refused because posts still target it. Name them and the tool that
+      // frees the segment, so the agent does not retry the delete blind.
+      const data = (error as { data?: Record<string, unknown> } | null)?.data;
+      if (data?.code !== "segment_in_use" || !Array.isArray(data.posts)) throw error;
+      const held = (data.posts as Array<Record<string, unknown>>)
+        .map((post) => `${String(post.id)} (${String(post.status)}, "${String(post.title ?? "")}")`)
+        .join(", ");
+      const failure = new Error(
+        `${(error as Error).message} Posts holding it: ${held}. Point each draft at another segment with issue.update_draft (segmentId), or pass null there to send it to all active contacts; unschedule a scheduled post first. Then delete again.`
+      ) as Error & { data?: unknown };
+      failure.data = data;
+      throw failure;
+    });
     return makeToolResult(`Segment ${result.id} deleted.`, result);
   }
 

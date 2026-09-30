@@ -1052,3 +1052,249 @@ test("issue.update_draft sends only what the agent passed", async () => {
   const body = JSON.parse(String(updated.init?.body));
   assert.deepEqual(body, { issueId: "iss_1", name: "Renamed", fromAddress: "", strictHeaders: true });
 });
+
+// ---------------------------------------------------------------------------
+// Targeting a post at a segment, and the segment inactivity filter. The draft
+// tools carry `segmentId` to tRPC (omit = all active contacts, null clears);
+// the segment tools carry `inactive_days` to REST (null clears on update).
+// ---------------------------------------------------------------------------
+
+type SchemaProperty = {
+  type?: unknown;
+  description?: string;
+  minimum?: number;
+  maximum?: number;
+};
+
+function schemaProperties(name: string): Record<string, SchemaProperty> {
+  return (findTool(name).inputSchema as { properties: Record<string, SchemaProperty> }).properties;
+}
+
+test("issue.create_draft advertises segmentId as a string and says what omitting it means", () => {
+  const segmentId = schemaProperties("issue.create_draft").segmentId;
+  assert.ok(segmentId, "issue.create_draft advertises segmentId");
+  assert.equal(segmentId.type, "string");
+  const description = segmentId.description ?? "";
+  assert.match(description, /all active contacts/i, "says omitting it sends to everyone active");
+  assert.match(description, /segment\.list/, "points at segment.list to find an id");
+  assert.match(description, /same publication/i, "says the id must be from the post's publication");
+  assert.match(description, /inactive_days/, "names the filter kinds resolved at send time");
+  assert.doesNotMatch(description, /[\u2013\u2014]/, "no en or em dashes");
+});
+
+test("issue.update_draft advertises segmentId as nullable, with null clearing it", () => {
+  const segmentId = schemaProperties("issue.update_draft").segmentId;
+  assert.ok(segmentId, "issue.update_draft advertises segmentId");
+  assert.deepEqual(segmentId.type, ["string", "null"]);
+  const description = segmentId.description ?? "";
+  assert.match(description, /null/, "says null clears it");
+  assert.match(description, /all active contacts/i);
+  assert.match(description, /segment\.list/);
+  assert.match(description, /same publication/i);
+  assert.doesNotMatch(description, /[\u2013\u2014]/, "no en or em dashes");
+  const update = findTool("issue.update_draft").inputSchema as { required?: string[] };
+  assert.deepEqual(update.required, ["issueId"], "targeting a segment needs no other field");
+});
+
+test("issue.create_draft forwards segmentId to issue.createDraft", async () => {
+  const { calls, fetchImpl } = recording(() => trpcOk({ id: "iss_1", status: "draft" }));
+  const response = await callTool(
+    "issue.create_draft",
+    { publicationId: "pub_1", title: "Win back", segmentId: "seg_1" },
+    fetchImpl
+  );
+  assert.equal(response.error, undefined, JSON.stringify(response.error));
+  const created = calls.find((call) => new URL(call.url).pathname === "/trpc/issue.createDraft");
+  assert.ok(created);
+  const body = JSON.parse(String(created.init?.body));
+  assert.equal(body.segmentId, "seg_1");
+});
+
+test("issue.create_draft sends no segmentId when the agent passed none", async () => {
+  const { calls, fetchImpl } = recording(() => trpcOk({ id: "iss_1", status: "draft" }));
+  const response = await callTool("issue.create_draft", { publicationId: "pub_1", title: "Hello" }, fetchImpl);
+  assert.equal(response.error, undefined, JSON.stringify(response.error));
+  const created = calls.find((call) => new URL(call.url).pathname === "/trpc/issue.createDraft");
+  assert.ok(created);
+  assert.equal("segmentId" in JSON.parse(String(created.init?.body)), false);
+});
+
+test("issue.update_draft forwards a segmentId, forwards null to clear it, and omits it when absent", async () => {
+  const { calls, fetchImpl } = recording(() => trpcOk({ id: "iss_1", status: "draft" }));
+  const bodies: Array<Record<string, unknown>> = [];
+  for (const args of [
+    { issueId: "iss_1", segmentId: "seg_1" },
+    { issueId: "iss_1", segmentId: null },
+    { issueId: "iss_1", title: "Only the subject" }
+  ]) {
+    const response = await callTool("issue.update_draft", args, fetchImpl);
+    assert.equal(response.error, undefined, JSON.stringify(response.error));
+    bodies.push(JSON.parse(String(calls.at(-1)?.init?.body)));
+  }
+  for (const call of calls) {
+    assert.equal(new URL(call.url).pathname, "/trpc/issue.updateDraft");
+  }
+  assert.deepEqual(bodies[0], { issueId: "iss_1", segmentId: "seg_1" });
+  assert.deepEqual(bodies[1], { issueId: "iss_1", segmentId: null });
+  assert.deepEqual(bodies[2], { issueId: "iss_1", title: "Only the subject" });
+});
+
+test("segment.create advertises inactive_days as an integer from 1 to 3650", () => {
+  const inactiveDays = schemaProperties("segment.create").inactive_days;
+  assert.ok(inactiveDays, "segment.create advertises inactive_days");
+  assert.equal(inactiveDays.type, "integer");
+  assert.equal(inactiveDays.minimum, 1);
+  assert.equal(inactiveDays.maximum, 3650);
+});
+
+test("segment.update advertises inactive_days as a nullable integer from 1 to 3650", () => {
+  const inactiveDays = schemaProperties("segment.update").inactive_days;
+  assert.ok(inactiveDays, "segment.update advertises inactive_days");
+  assert.deepEqual(inactiveDays.type, ["integer", "null"]);
+  assert.equal(inactiveDays.minimum, 1);
+  assert.equal(inactiveDays.maximum, 3650);
+  assert.match(inactiveDays.description ?? "", /null/, "says null clears it");
+});
+
+test("inactive_days says it picks the silent cohort, counts never-engaged contacts, and is not backfilled", () => {
+  for (const name of ["segment.create", "segment.update"]) {
+    const description = schemaProperties(name).inactive_days?.description ?? "";
+    assert.match(description, /no open or click/i, `${name} says what inactive means`);
+    assert.match(description, /never engaged/i, `${name} says a never-engaged contact counts`);
+    assert.match(description, /not backfilled/i, `${name} says history is not backfilled`);
+    assert.match(description, /no recorded engagement/i, `${name} says what an unrecorded contact counts as`);
+    assert.doesNotMatch(description, /migration|0097/i, `${name}: no internal migration jargon`);
+    assert.match(description, /not an? .*engaged readers/i, `${name} says it is not an engaged filter`);
+    assert.doesNotMatch(description, /[\u2013\u2014]/, `${name}: no en or em dashes`);
+  }
+});
+
+test("segment.create forwards inactive_days as a number", async () => {
+  const { calls, fetchImpl } = recording(() => json(200, { id: "seg_1", name: "Silent 90" }));
+  const response = await callTool(
+    "segment.create",
+    { publicationId: "pub_1", name: "Silent 90", inactive_days: 90 },
+    fetchImpl
+  );
+  assert.equal(response.error, undefined, JSON.stringify(response.error));
+  assert.equal(new URL(calls[0]!.url).pathname, "/v1/segments");
+  assert.deepEqual(JSON.parse(String(calls[0]!.init?.body)), {
+    publication_id: "pub_1",
+    name: "Silent 90",
+    inactive_days: 90
+  });
+});
+
+test("segment.create sends no inactive_days when the agent passed none", async () => {
+  const { calls, fetchImpl } = recording(() => json(200, { id: "seg_1", name: "VIPs" }));
+  await callTool("segment.create", { publicationId: "pub_1", name: "VIPs" }, fetchImpl);
+  assert.equal("inactive_days" in JSON.parse(String(calls[0]!.init?.body)), false);
+});
+
+test("segment.update forwards inactive_days, forwards null to clear it, and omits it when absent", async () => {
+  const { calls, fetchImpl } = recording(() => json(200, { id: "seg_1", name: "Seg" }));
+  for (const args of [
+    { publicationId: "pub_1", segmentId: "seg_1", inactive_days: 30 },
+    { publicationId: "pub_1", segmentId: "seg_1", inactive_days: null },
+    { publicationId: "pub_1", segmentId: "seg_1", name: "Renamed" }
+  ]) {
+    const response = await callTool("segment.update", args, fetchImpl);
+    assert.equal(response.error, undefined, JSON.stringify(response.error));
+  }
+  const bodies = calls.map((call) => JSON.parse(String(call.init?.body)));
+  assert.deepEqual(bodies[0], { inactive_days: 30 });
+  assert.deepEqual(bodies[1], { inactive_days: null });
+  assert.deepEqual(bodies[2], { name: "Renamed" });
+});
+
+test("the segment_add step says an inactive_days segment is a filter too", async () => {
+  // Both places an agent reads it: the step help inlined into the automation
+  // write tools, and the machine-readable step catalog resource.
+  for (const name of ["automation.create", "automation.update"]) {
+    assert.match(
+      findTool(name).description,
+      /segment_add: \{segment_id\} \([^)]*status_filter, query_filter or inactive_days/,
+      `${name}'s step help names every filter kind`
+    );
+  }
+  const response = await handleMcpRequest({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "resources/read",
+    params: { uri: "mailtea://automations/step-types" }
+  });
+  const text = (response as { result?: { contents?: Array<{ text?: string }> } }).result?.contents?.[0]?.text;
+  const catalog = JSON.parse(String(text)) as { step_types: Array<{ type: string; description: string }> };
+  const segmentAdd = catalog.step_types.find((step) => step.type === "segment_add");
+  assert.match(segmentAdd?.description ?? "", /status_filter, query_filter or inactive_days/);
+});
+
+// An empty, blank or non-string segmentId is refused, never dropped. Dropping
+// it on create_draft would make a post for every active contact and report
+// success; on update_draft it would be a silent no-op. REST answers 400 and the
+// CLI refuses it too.
+test("issue.create_draft refuses a segmentId that is empty, blank, not a string, or null", async () => {
+  for (const segmentId of ["", "   ", 42, null]) {
+    const { calls, fetchImpl } = recording(() => trpcOk({ id: "iss_1", status: "draft" }));
+    const response = await callTool(
+      "issue.create_draft",
+      { publicationId: "pub_1", title: "Win back", segmentId },
+      fetchImpl
+    );
+    const message = response.error?.message ?? "";
+    assert.ok(response.error, `segmentId ${JSON.stringify(segmentId)} was accepted`);
+    assert.match(message, /omit segmentId to send to all active contacts/i);
+    assert.equal(
+      calls.some((call) => new URL(call.url).pathname === "/trpc/issue.createDraft"),
+      false,
+      `segmentId ${JSON.stringify(segmentId)} still created a draft`
+    );
+  }
+});
+
+test("issue.update_draft refuses a segmentId that is empty, blank or not a string, and still takes null", async () => {
+  for (const segmentId of ["", "   ", 42]) {
+    const { calls, fetchImpl } = recording(() => trpcOk({ id: "iss_1", status: "draft" }));
+    const response = await callTool("issue.update_draft", { issueId: "iss_1", segmentId }, fetchImpl);
+    assert.ok(response.error, `segmentId ${JSON.stringify(segmentId)} was accepted`);
+    assert.match(response.error?.message ?? "", /pass null on issue\.update_draft to clear it/i);
+    assert.equal(calls.length, 0, `segmentId ${JSON.stringify(segmentId)} still wrote the draft`);
+  }
+  const { calls, fetchImpl } = recording(() => trpcOk({ id: "iss_1", status: "draft" }));
+  const response = await callTool("issue.update_draft", { issueId: "iss_1", segmentId: null }, fetchImpl);
+  assert.equal(response.error, undefined, JSON.stringify(response.error));
+  assert.deepEqual(JSON.parse(String(calls[0]!.init?.body)), { issueId: "iss_1", segmentId: null });
+});
+
+// A segment a draft, scheduled or sending post targets cannot be deleted: the
+// API refuses with 409 segment_in_use and lists the posts. Deleting it used to
+// null the posts' segment, silently widening them to every active contact.
+test("segment.delete says a segment in use by a post is refused, and what to do instead", () => {
+  const description = findTool("segment.delete").description;
+  assert.match(description, /segment_in_use/);
+  assert.match(description, /draft, scheduled or sending post/i);
+  assert.match(description, /issue\.update_draft/);
+  assert.doesNotMatch(description, /[\u2013\u2014]/, "no en or em dashes");
+});
+
+test("segment.delete names the posts that hold the segment when it is refused", async () => {
+  const posts = [
+    { id: "iss_1", title: "Win back", status: "draft" },
+    { id: "iss_2", title: "Weekly", status: "scheduled" }
+  ];
+  const { fetchImpl } = recording(() =>
+    json(409, {
+      error:
+        'Segment "VIP" is still the audience of 2 posts that are not sent yet (drafts, scheduled or sending). Deleting it would send those posts to all active contacts instead, so nothing was deleted.',
+      code: "segment_in_use",
+      posts
+    })
+  );
+  const response = await callTool("segment.delete", { publicationId: "pub_1", segmentId: "seg_1" }, fetchImpl);
+  const message = response.error?.message ?? "";
+  assert.match(message, /code: segment_in_use/);
+  assert.match(message, /iss_1/);
+  assert.match(message, /iss_2/);
+  assert.match(message, /issue\.update_draft/);
+  assert.deepEqual((response.error?.data as { posts?: unknown } | undefined)?.posts, posts);
+});
