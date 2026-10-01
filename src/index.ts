@@ -2714,7 +2714,8 @@ export const MCP_TOOLS = [
   },
   {
     name: "issue.schedule",
-    description: "Schedule an issue for delivery",
+    description:
+      "Schedule an issue for delivery. A newsletter is also published to the public website when it has been delivered; a broadcast is email only and never is. The send is refused, with the reason, when the team has no verified sending domain and the audience includes anyone outside the team.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2741,7 +2742,7 @@ export const MCP_TOOLS = [
   {
     name: "issue.publish_to_web",
     description:
-      "Publish an issue to the publication's public website, making it readable on the web (typically a sent issue).",
+      "Publish an issue to the publication's public website, making it readable on the web (typically a sent issue). Newsletters only: a broadcast is email only, and publishing one is refused.",
     inputSchema: {
       type: "object",
       properties: { issueId: { type: "string" } },
@@ -2759,7 +2760,8 @@ export const MCP_TOOLS = [
   },
   {
     name: "issue.send_now",
-    description: "Send an issue immediately",
+    description:
+      "Send an issue immediately. A newsletter is also published to the public website; a broadcast is email only and never is. The send is refused, with the reason, when the team has no verified sending domain and the audience includes anyone outside the team.",
     inputSchema: {
       type: "object",
       properties: {

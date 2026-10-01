@@ -2,6 +2,18 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
+## Unreleased
+
+- Changed: `issue.send_now`, `issue.schedule` and `issue.publish_to_web` say
+  that a broadcast is email only. The API no longer publishes a broadcast to
+  the website when `issue.send_now` or `issue.schedule` is called without
+  `publishToWeb` (which defaults to true), and `issue.publish_to_web` on a
+  broadcast is refused with a message. `issue.send_now` and `issue.schedule`
+  also say that a send from a team with no verified sending domain to anyone
+  outside the team is refused with the reason; it used to be accepted and fail
+  a moment later. These are API changes, live when the API deploys; the new
+  descriptions come with the next release of this package.
+
 ## 0.20.0 (2026-10-01)
 
 - Changed: `contact.list` takes several whole email addresses in `query`,
