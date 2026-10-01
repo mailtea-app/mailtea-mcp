@@ -4,6 +4,33 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
 
+- Changed: `contact.list` takes several whole email addresses in `query`,
+  separated by commas, spaces or line breaks, and returns exactly those
+  contacts. A list used to be matched as one piece of text and found nothing.
+  A single term is still a substring search. A list with an entry that is
+  not a whole address is refused with that entry named. The `query` field
+  now says so.
+  Needs the API deployed with this change.
+- Changed: `email.send` refuses a send with no `html`, `text` or `template`
+  before any request, with the same message the API now returns: "Provide
+  'html', 'text' or a 'template'. An email with no body is not sent." The API
+  used to accept such a send and deliver an empty email; it now answers 400.
+  An empty string is no body. The `email.batch` description says every item
+  needs one, since one bodyless item refuses the whole batch.
+- Changed: `publication.create` refuses a `publicationId` that does not start
+  with `pub_`, and a taken id is refused with the same "not available" message
+  whoever holds it (it used to say the id "already exists", which confirmed
+  another team's publication). The `publicationId` description says both.
+  Needs the API deployed with this change.
+- Changed: in `site.apply_ops`, `set_navbar_template` and
+  `set_footer_template` write the publication's own name into the template's
+  wordmark and legal line when `brand` is omitted. They used to leave the
+  library's "Your publication" placeholder on the site. Needs the API deployed
+  with this change.
+- Added: `domain.claim` takes `purpose` (`email`, `site` or `both`, default
+  `email`), so an agent can claim a domain that only serves the website without
+  changing its purpose afterwards. A `site` claim gets no sending identity. The
+  claim replies carry `purpose`. Needs the API deployed with this change.
 - Added: `issue.create_draft` takes `segmentId` and `issue.update_draft` takes
   `segmentId` (`null` clears it), so an agent can send a post to one audience
   segment instead of all active contacts. Omitted, a post still goes to all

@@ -1637,7 +1637,7 @@ const SITE_OP_SCHEMA = {
         brand: {
           type: "string",
           description:
-            "Wordmark text, for the templates that carry one. Omitted, the template's placeholder is kept."
+            "The name the footer spells: its wordmark, where it has one, and its legal line. Omitted, the publication's own name is used."
         }
       },
       required: ["op", "templateId"]
@@ -1656,7 +1656,7 @@ const SITE_OP_SCHEMA = {
         brand: {
           type: "string",
           description:
-            "Wordmark text. Omitted, the template's placeholder is kept and the operator renames it in the builder."
+            "Wordmark text. Omitted, the publication's own name is used."
         }
       },
       required: ["op", "templateId"]
@@ -1935,7 +1935,7 @@ export const MCP_TOOLS = [
         publicationId: {
           type: "string",
           description:
-            "Optional id to assign the NEW publication (prefix pub_). This is not the publication to act on — publication.create always creates one."
+            "Optional id to assign the NEW publication. It must start with pub_; leave it out and one is generated. An id that is already taken is refused as not available. This is not the publication to act on: publication.create always creates one."
         },
         name: { type: "string" },
         timezone: { type: "string" }
@@ -2157,7 +2157,11 @@ export const MCP_TOOLS = [
           type: "string",
           enum: ["active", "unsubscribed", "suppressed"]
         },
-        query: { type: "string" },
+        query: {
+          type: "string",
+          description:
+            "Part of an email address to search for. Or several whole addresses separated by commas, spaces or line breaks, to get exactly those contacts (up to 320 characters). A list with an entry that is not a whole address is refused with the entry named, rather than searched as one piece of text."
+        },
         limit: { type: "number" }
       }
     }
@@ -3121,7 +3125,7 @@ export const MCP_TOOLS = [
         emails: {
           type: "array",
           description:
-            "1-100 email objects: { from, to, subject, html?|text?|template?, cc?, bcc?, reply_to?, tracking_open?, tracking_click?, tags?, headers? }. Every item's `from` must be on a domain the team has verified; one that is not refuses the WHOLE batch with 422 and creates nothing. Set tracking_open/tracking_click false to send without an open pixel or rewritten links; a domain with tracking switched off cannot be overridden here.",
+            "1-100 email objects: { from, to, subject, html?|text?|template?, cc?, bcc?, reply_to?, tracking_open?, tracking_click?, tags?, headers? }. Every item needs html, text or a template; an item with none of them refuses the WHOLE batch with 400. Every item's `from` must be on a domain the team has verified; one that is not refuses the WHOLE batch with 422 and creates nothing. Set tracking_open/tracking_click false to send without an open pixel or rewritten links; a domain with tracking switched off cannot be overridden here.",
           items: { type: "object" }
         }
       },
@@ -3489,6 +3493,12 @@ export const MCP_TOOLS = [
           enum: ["us-west-1", "eu-west-1", "ap-southeast-1", "ap-southeast-2"],
           description:
             "Where the claimed domain will send from once the claim completes. Fixed at that point, like any domain's region."
+        },
+        purpose: {
+          type: "string",
+          enum: ["email", "site", "both"],
+          description:
+            "What the claimed domain is for: 'email' (sending), 'site' (serving the publication's website) or 'both'. Defaults to 'email'. A 'site' domain gets no sending identity, so pick it when the domain only serves the website."
         }
       },
       required: ["name"]
@@ -7719,6 +7729,9 @@ async function runTool(
         "Provide exactly one of 'from' or 'sender_id', or send a template, whose published sender is used."
       );
     }
+    if (!body.html && !body.text && !templated) {
+      throw new Error("Provide 'html', 'text' or a 'template'. An email with no body is not sent.");
+    }
 
     const result = await callRestApi<{ id: string }>(
       "POST",
@@ -8199,6 +8212,7 @@ async function runTool(
     const publicationId = await readPublicationId(args, options);
     const name = readRequiredString(args, "name");
     const region = asOptionalString(args.region);
+    const purpose = asOptionalString(args.purpose);
     const result = await callRestApi<{
       id: string;
       name: string;
@@ -8208,7 +8222,12 @@ async function runTool(
     }>(
       "POST",
       "/v1/domains/claim",
-      { publication_id: publicationId, name, ...(region ? { region } : {}) },
+      {
+        publication_id: publicationId,
+        name,
+        ...(region ? { region } : {}),
+        ...(purpose ? { purpose } : {})
+      },
       options
     );
     // The record is stated inline, not left for a follow-up call: it is the one
