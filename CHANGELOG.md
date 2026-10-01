@@ -2,7 +2,7 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
-## Unreleased
+## 0.20.0 (2026-10-01)
 
 - Changed: `contact.list` takes several whole email addresses in `query`,
   separated by commas, spaces or line breaks, and returns exactly those
