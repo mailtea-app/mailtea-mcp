@@ -2,8 +2,28 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
-## Unreleased
+## 0.21.0 (2026-10-03)
 
+- Added: every tool in `tools/list` carries a `title` and the four MCP tool
+  annotations: `readOnlyHint`, `destructiveHint`, `idempotentHint` and
+  `openWorldHint`. The title is in both places the spec reads it from (the
+  top-level `title` and `annotations.title`). Each value was checked against
+  what the tool and the API behind it do. Every send is destructive and open
+  world, including `issue.schedule` (scheduling is a later send),
+  `event.send` and `automation.enable` (they start automations that email
+  contacts). Every delete, remove, revoke, cancel, archive and discard is
+  destructive, and so are the tools that change whether a contact can be
+  emailed: `suppression.add`, `suppression.remove`, `contact.set_status`, and
+  `contact.upsert` and `contact.import_csv`, which reactivate unsubscribed
+  contacts. `site.page_upsert` is destructive because it writes a page's live
+  row. Sends are not idempotent, even where an `idempotency_key` is accepted,
+  because the key is optional. `site.pages_list` and `site.page_get` are not
+  read only: the first read for a publication creates its reserved pages. The
+  hosted server serves the same catalog, so the hints reach it on deploy; this
+  release carries them to stdio. The full table is in the MCP server docs.
+- Changed: `domain.tracking_verify` says that verifying a tracking subdomain
+  removes every other tracking subdomain on the domain and detaches their
+  edge hosts. It already did; the description did not say so.
 - Changed: `issue.send_now`, `issue.schedule` and `issue.publish_to_web` say
   that a broadcast is email only. The API no longer publishes a broadcast to
   the website when `issue.send_now` or `issue.schedule` is called without
@@ -12,7 +32,7 @@ All notable changes to `mailtea-mcp` are documented here.
   also say that a send from a team with no verified sending domain to anyone
   outside the team is refused with the reason; it used to be accepted and fail
   a moment later. These are API changes, live when the API deploys; the new
-  descriptions come with the next release of this package.
+  descriptions ship in this release.
 
 ## 0.20.0 (2026-10-01)
 
