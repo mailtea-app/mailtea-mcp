@@ -2,6 +2,16 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
+## Unreleased
+
+- Changed (API): `issue.send_now` and `issue.schedule` send to the whole
+  audience. They used to stop at 10,000 recipients without saying so. One
+  send can reach at most 25,000; a larger audience is refused with a message
+  naming the count and the limit, and nothing is sent or scheduled. A
+  scheduled send resolves its audience when it goes out, so contacts who join
+  after scheduling receive it. No package change: this is the API's behaviour
+  once it is deployed.
+
 ## 0.21.0 (2026-10-03)
 
 - Added: every tool in `tools/list` carries a `title` and the four MCP tool
