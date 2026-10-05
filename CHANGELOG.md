@@ -4,6 +4,22 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
 
+- Changed: the `region` descriptions on `domain.create` and `domain.list` no
+  longer speak of a deployment. A new domain defaults to Mailtea's default
+  region, US West (`us-west-1`), unless you pick another enabled region. The
+  API's refusal for a region that is not enabled now reads "not one of
+  Mailtea's enabled regions" (code `region_not_available`, unchanged).
+- Added: `issue.send_now` and `issue.send_and_wait` take an optional
+  `publishToWeb` boolean, the same choice as Email + Web and Email only in
+  Mailtea Studio. Left out or `true`, a newsletter is published to the public
+  website as the send starts, as before. `false` sends it by email only and
+  leaves it off the website. A broadcast is never published, whatever the
+  value. `issue.schedule` does not take it, because a scheduled newsletter
+  cannot be sent by email only; its description now says so.
+- Changed: the descriptions of `issue.send_now`, `issue.send_and_wait` and
+  `issue.schedule` state the recipient limit. One send reaches at most 25,000
+  contacts by default, a larger audience is refused with the count, and the
+  remedy is to split the audience into segments and send one post to each.
 - Changed (API): `issue.send_now` and `issue.schedule` send to the whole
   audience. They used to stop at 10,000 recipients without saying so. One
   send can reach at most 25,000; a larger audience is refused with a message

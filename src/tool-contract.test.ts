@@ -1298,3 +1298,113 @@ test("segment.delete names the posts that hold the segment when it is refused", 
   assert.match(message, /issue\.update_draft/);
   assert.deepEqual((response.error?.data as { posts?: unknown } | undefined)?.posts, posts);
 });
+
+// --- Email only from MCP (review follow-up, October 2026) -------------------
+//
+// Studio's send dialog offers "Email only" (tRPC `issue.sendNow` takes
+// `publishToWeb`), but issue.send_now never advertised or forwarded it, so an
+// agent could only send a newsletter that also went on the public website. An
+// agent that passed it anyway got "Ignored unknown argument" and a published
+// post.
+
+const sendingIssue = {
+  id: "iss_1",
+  publicationId: "pub_1",
+  title: "Launch",
+  status: "sending",
+  createdAt: "2026-10-05T00:00:00.000Z",
+  updatedAt: "2026-10-05T00:00:01.000Z",
+  scheduledAt: null,
+  sentAt: null
+};
+
+function sendNowBodies(calls: FetchCall[]) {
+  return calls
+    .filter((call) => new URL(call.url).pathname === "/trpc/issue.sendNow")
+    .map((call) => JSON.parse(String(call.init?.body)) as Record<string, unknown>);
+}
+
+test("issue.send_now and issue.send_and_wait advertise publishToWeb as an optional boolean", () => {
+  for (const name of ["issue.send_now", "issue.send_and_wait"]) {
+    const tool = findTool(name);
+    const property = tool.inputSchema.properties?.publishToWeb;
+    assert.ok(property, `${name} declares publishToWeb`);
+    assert.equal(property.type, "boolean");
+    assert.match(property.description ?? "", /default/i);
+    assert.match(property.description ?? "", /broadcast/i, "says a broadcast ignores it");
+    assert.equal(tool.inputSchema.required?.includes("publishToWeb"), false);
+  }
+  assert.match(findTool("issue.send_now").description, /publishToWeb is false/);
+});
+
+test("issue.send_now passes publishToWeb false through, and says the send is email only", async () => {
+  const { calls, fetchImpl } = recording(() => trpcOk(sendingIssue));
+
+  const response = await callTool("issue.send_now", { issueId: "iss_1", publishToWeb: false }, fetchImpl);
+
+  assert.deepEqual(sendNowBodies(calls), [{ issueId: "iss_1", publishToWeb: false }]);
+  const text = (response.result as { content: Array<{ text: string }> }).content
+    .map((part) => part.text)
+    .join("\n");
+  assert.doesNotMatch(text, /Ignored unknown argument/);
+  assert.match(text, /email only/i);
+});
+
+test("issue.send_now leaves publishToWeb to the API when it is not given, and refuses a non-boolean", async () => {
+  const { calls, fetchImpl } = recording(() => trpcOk(sendingIssue));
+
+  await callTool("issue.send_now", { issueId: "iss_1" }, fetchImpl);
+  await callTool("issue.send_now", { issueId: "iss_1", publishToWeb: true }, fetchImpl);
+  assert.deepEqual(sendNowBodies(calls), [{ issueId: "iss_1" }, { issueId: "iss_1", publishToWeb: true }]);
+
+  const refused = await callTool("issue.send_now", { issueId: "iss_1", publishToWeb: "no" }, fetchImpl);
+  assert.match(JSON.stringify(refused), /publishToWeb must be a boolean/);
+  assert.equal(sendNowBodies(calls).length, 2, "a malformed value never reaches the API");
+});
+
+test("issue.send_and_wait passes publishToWeb false through", async () => {
+  const { calls, fetchImpl } = recording((call) => {
+    if (new URL(call.url).pathname === "/trpc/issue.sendNow") return trpcOk(sendingIssue);
+    return trpcOk({
+      issueId: "iss_1",
+      publicationId: "pub_1",
+      status: "sent",
+      updatedAt: "2026-10-05T00:00:09.000Z",
+      sentAt: "2026-10-05T00:00:09.000Z",
+      delivery: { total: 1, sent: 1, failed: 0, pending: 0, processed: 1, completionPercent: 100, hasSnapshot: true, isPreparing: false }
+    });
+  });
+
+  await callTool("issue.send_and_wait", { issueId: "iss_1", publishToWeb: false, pollIntervalMs: 250 }, fetchImpl);
+
+  assert.deepEqual(sendNowBodies(calls), [{ issueId: "iss_1", publishToWeb: false }]);
+});
+
+test("the send tools state the recipient limit and the remedy; schedule says Email only is a send-now option", () => {
+  for (const name of ["issue.send_now", "issue.schedule"]) {
+    const description = findTool(name).description;
+    assert.match(description, /25,000/, `${name} names the default limit`);
+    assert.match(description, /refused with the count/, `${name} says a larger audience is refused`);
+    assert.match(description, /split the audience into segments/i, `${name} gives the remedy`);
+  }
+  assert.match(findTool("issue.send_and_wait").description, /at most 25,000 contacts by default/);
+  // The API refuses a scheduled email-only newsletter, so schedule must not
+  // offer the option, and must point at the tool that has it.
+  const schedule = findTool("issue.schedule");
+  assert.equal(schedule.inputSchema.properties?.publishToWeb, undefined);
+  assert.match(schedule.description, /issue\.send_now with publishToWeb false/);
+});
+
+// Review follow-up, October 2026: the domain tools told agents about "the
+// deployment's default region", a self-hosting idea the hosted product has no
+// use for.
+test("the domain region descriptions speak of Mailtea's regions, not a deployment", () => {
+  const create = findTool("domain.create").inputSchema.properties?.region?.description ?? "";
+  assert.match(create, /Defaults to Mailtea's default region, US West \(us-west-1\), unless you pick another enabled region\./);
+  assert.match(create, /region_not_available/);
+  const list = findTool("domain.list").inputSchema.properties?.region?.description ?? "";
+  for (const description of [create, list]) {
+    assert.doesNotMatch(description, /deployment|self-host/i);
+    assert.doesNotMatch(description, /[\u2013\u2014]/);
+  }
+});

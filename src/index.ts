@@ -1822,6 +1822,19 @@ function toolHints(title: string, hints: McpToolHints) {
   return { title, annotations: { title, ...hints } };
 }
 
+/**
+ * `publishToWeb` on the send-now tools, passed through to tRPC `issue.sendNow`
+ * (Studio's "Email + Web" and "Email only"). Left out, the API's default
+ * applies: a newsletter is published. `issue.schedule` does not take it: the
+ * API refuses a scheduled email-only newsletter, so advertising it there would
+ * offer an option that can only fail.
+ */
+const ISSUE_SEND_PUBLISH_TO_WEB_PROPERTY = {
+  type: "boolean",
+  description:
+    "Newsletters only. true (the default) also publishes the post to the public website as the send starts. false sends it by email only and leaves it off the website. Ignored for a broadcast, which never goes on the website."
+} as const;
+
 export const MCP_TOOLS = [
   {
     name: "auth.me",
@@ -2841,7 +2854,7 @@ export const MCP_TOOLS = [
     // Destructive and open world: scheduling is a send, just a later one. At the scheduled time the worker mails the audience, and publishes a newsletter to the web, with no further check. Not idempotent: on a failed issue it arms a retry.
     ...toolHints("Schedule issue send", { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }),
     description:
-      "Schedule an issue for delivery. A newsletter is also published to the public website when it has been delivered; a broadcast is email only and never is. The send is refused, with the reason, when the team has no verified sending domain and the audience includes anyone outside the team.",
+      "Schedule an issue for delivery. A newsletter is also published to the public website when it has been delivered; a broadcast is email only and never is. A scheduled newsletter cannot be sent by email only: use issue.send_now with publishToWeb false for that. One send reaches at most the server's recipient limit, 25,000 by default. A larger audience is refused with the count when you schedule, and a scheduled post whose audience grows past the limit before it goes out fails with the count. Nothing is sent either way: split the audience into segments and send one post to each. The send is refused, with the reason, when the team has no verified sending domain and the audience includes anyone outside the team.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2894,11 +2907,12 @@ export const MCP_TOOLS = [
     // Not idempotent: a repeat on a sending or sent issue is refused, but on a failed issue it sends again.
     ...toolHints("Send issue now", { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }),
     description:
-      "Send an issue immediately. A newsletter is also published to the public website; a broadcast is email only and never is. The send is refused, with the reason, when the team has no verified sending domain and the audience includes anyone outside the team.",
+      "Send an issue immediately. A newsletter is also published to the public website unless publishToWeb is false (Studio's Email only); a broadcast is email only and never is, whatever publishToWeb says. One send reaches at most the server's recipient limit, 25,000 by default. A larger audience is refused with the count and nothing is sent: split the audience into segments and send one post to each. The send is refused, with the reason, when the team has no verified sending domain and the audience includes anyone outside the team.",
     inputSchema: {
       type: "object",
       properties: {
-        issueId: { type: "string" }
+        issueId: { type: "string" },
+        publishToWeb: ISSUE_SEND_PUBLISH_TO_WEB_PROPERTY
       },
       required: ["issueId"]
     }
@@ -2906,11 +2920,13 @@ export const MCP_TOOLS = [
   {
     name: "issue.send_and_wait",
     ...toolHints("Send issue and wait", { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }),
-    description: "Send an issue now and poll until sent/failed or timeout",
+    description:
+      "Send an issue now, as issue.send_now does, and poll until sent/failed or timeout. A newsletter is also published to the public website unless publishToWeb is false; a broadcast never is. The same recipient limit applies: one send reaches at most 25,000 contacts by default, and a larger audience is refused with the count.",
     inputSchema: {
       type: "object",
       properties: {
         issueId: { type: "string" },
+        publishToWeb: ISSUE_SEND_PUBLISH_TO_WEB_PROPERTY,
         timeoutMs: {
           type: "number",
           description: "Optional timeout in milliseconds. Defaults to 60000."
@@ -3521,7 +3537,7 @@ export const MCP_TOOLS = [
           type: "string",
           enum: ["us-west-1", "eu-west-1", "ap-southeast-1", "ap-southeast-2"],
           description:
-            "Where this domain's mail is sent from. Defaults to the deployment's default region. CANNOT be changed later — to move a domain, delete it and add it again. A region this deployment has not enabled is refused with code 'region_not_available'."
+            "Where this domain's mail is sent from. Defaults to Mailtea's default region, US West (us-west-1), unless you pick another enabled region. It CANNOT be changed later: to move a domain, delete it and add it again. A region that is not enabled is refused with code 'region_not_available'."
         },
         tls: {
           type: "string",
@@ -3555,7 +3571,7 @@ export const MCP_TOOLS = [
         region: {
           type: "string",
           description:
-            "Only domains sending from this region, as domain.list reports it: one of us-west-1, eu-west-1, ap-southeast-1, ap-southeast-2, or this deployment's default region."
+            "Only domains sending from this region, as domain.list reports it, for example us-west-1, eu-west-1, ap-southeast-1 or ap-southeast-2."
         },
         status: {
           type: "string",
@@ -5189,6 +5205,11 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+/** tRPC `issue.sendNow` input: `publishToWeb` only when the caller chose one. */
+function issueSendNowInput(issueId: string, publishToWeb: boolean | undefined) {
+  return publishToWeb === undefined ? { issueId } : { issueId, publishToWeb };
 }
 
 function readOptionalBoolean(args: Record<string, unknown>, key: string): boolean | undefined {
@@ -7535,24 +7556,29 @@ async function runTool(
 
   if (toolName === "issue.send_now") {
     const issueId = readRequiredString(args, "issueId");
+    const publishToWeb = readOptionalBoolean(args, "publishToWeb");
 
     const issue = await callTrpc<IssueRecord>(
       "issue.sendNow",
-      { issueId },
+      issueSendNowInput(issueId, publishToWeb),
       options
     );
 
-    return makeToolResult(`Issue sent: ${issue.id}`, { issue });
+    return makeToolResult(
+      publishToWeb === false ? `Issue sent by email only: ${issue.id}` : `Issue sent: ${issue.id}`,
+      { issue }
+    );
   }
 
   if (toolName === "issue.send_and_wait") {
     const issueId = readRequiredString(args, "issueId");
+    const publishToWeb = readOptionalBoolean(args, "publishToWeb");
     const timeoutMs = Math.max(1_000, Math.min(300_000, Math.trunc(readOptionalNumber(args, "timeoutMs") ?? 60_000)));
     const pollIntervalMs = Math.max(250, Math.min(10_000, Math.trunc(readOptionalNumber(args, "pollIntervalMs") ?? 2_000)));
 
     const issue = await callTrpc<IssueRecord>(
       "issue.sendNow",
-      { issueId },
+      issueSendNowInput(issueId, publishToWeb),
       options
     );
     const startedAt = Date.now();
