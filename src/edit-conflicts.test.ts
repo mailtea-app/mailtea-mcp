@@ -2,6 +2,22 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { MCP_TOOLS, handleMcpRequest } from "./index.js";
 
+type JsonRpcResponse = Awaited<ReturnType<typeof handleMcpRequest>>;
+
+/**
+ * A tool failure: the isError result MCP reports tool errors as, or the
+ * JSON-RPC error a protocol fault (unknown tool, malformed request) still is.
+ */
+function toolFailure(response: JsonRpcResponse): { message: string; data?: Record<string, unknown> } | undefined {
+  if (response.error) return { message: response.error.message, data: response.error.data as Record<string, unknown> | undefined };
+  const result = response.result as
+    | { isError?: boolean; content?: Array<{ text?: string }>; structuredContent?: Record<string, unknown> }
+    | undefined;
+  if (!result?.isError) return undefined;
+  const { error: _message, ...data } = result.structuredContent ?? {};
+  return { message: result.content?.[0]?.text ?? "", data: Object.keys(data).length > 0 ? data : undefined };
+}
+
 /**
  * Agents and people editing the same thing (QA run 0924a, D2: mcp/F02, F03,
  * F04). An agent only discovers what the tool schema advertises, so each of the
@@ -88,12 +104,12 @@ test("template.update sends base_revision and turns stale_write into a re-read i
   );
   const patch = calls.find((call) => new URL(call.url).pathname === "/v1/templates/etpl_1");
   assert.equal(patch?.body?.base_revision, 6);
-  const message = response.error?.message ?? "";
+  const message = toolFailure(response)?.message ?? "";
   assert.match(message, /Changed elsewhere/);
   assert.match(message, /template\.get/);
   assert.match(message, /base_revision 7/);
   assert.match(message, /Do not resend/);
-  assert.equal((response.error?.data as { current_revision?: number } | undefined)?.current_revision, 7);
+  assert.equal((toolFailure(response)?.data as { current_revision?: number } | undefined)?.current_revision, 7);
 });
 
 test("automation.update sends base_version and turns stale_version into a re-read instruction", async () => {
@@ -115,7 +131,7 @@ test("automation.update sends base_version and turns stale_version into a re-rea
   );
   const patch = calls.find((call) => new URL(call.url).pathname === "/v1/automations/aut_1");
   assert.equal(patch?.body?.base_version, 2);
-  const message = response.error?.message ?? "";
+  const message = toolFailure(response)?.message ?? "";
   assert.match(message, /automation\.get/);
   assert.match(message, /base_version 3/);
 });
@@ -138,7 +154,7 @@ test("issue.update_draft sends baseUpdatedAt and turns the conflict into a re-re
   );
   const update = calls.find((call) => new URL(call.url).pathname === "/trpc/issue.updateDraft");
   assert.equal(update?.body?.baseUpdatedAt, "2026-09-27T00:00:00.000Z");
-  const message = response.error?.message ?? "";
+  const message = toolFailure(response)?.message ?? "";
   assert.match(message, /issue\.get_editor/);
   assert.match(message, /baseUpdatedAt/);
   assert.doesNotMatch(message, /reload/i, "an agent has no page to reload");
@@ -149,7 +165,7 @@ test("a write with no token still goes out unconditionally, as before", async ()
     json(200, { object: "template", id: "etpl_1", revision: 1, has_unpublished_versions: false })
   );
   const response = await callTool("template.update", { templateId: "etpl_1", subject: "New" }, fetchImpl);
-  assert.equal(response.error, undefined, JSON.stringify(response.error));
+  assert.equal(toolFailure(response), undefined, JSON.stringify(toolFailure(response)));
   const patch = calls.find((call) => new URL(call.url).pathname === "/v1/templates/etpl_1");
   assert.equal(patch?.body && "base_revision" in patch.body, false);
 });

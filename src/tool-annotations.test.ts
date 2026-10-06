@@ -11,7 +11,9 @@ import { MCP_TOOLS, handleMcpRequest } from "./index.js";
  * send marked non-destructive is the failure that matters most, so the sends,
  * the deletes and the consent changes are named here one by one, and the name
  * patterns below catch a new tool that joins one of those families without
- * saying so.
+ * saying so. Any other write that changes existing data is destructive too:
+ * only a purely additive create is not (Anthropic connector review, audit
+ * 2026-10-06).
  *
  * Self-contained on purpose (no `-parity` suffix, nothing read from outside the
  * package), so it ships with the standalone mailtea-mcp mirror.
@@ -118,6 +120,35 @@ const APPENDS_HISTORY = [
  */
 const READS_THAT_WRITE = ["site.pages_list", "site.page_get"];
 
+/**
+ * The only writes that are not destructive: each creates something new and
+ * touches nothing that already exists. Anthropic's connector review wants
+ * "destructiveHint true for tools that modify or delete data", and the MCP
+ * spec reads false as "only additive updates", so everything else that writes
+ * is destructive. `sender.create` is not here: isDefault demotes the current
+ * default sender.
+ */
+const PURELY_ADDITIVE = [
+  "issue.create_draft",
+  "publication.create",
+  "section.pack_create",
+  "section.create",
+  "template.create",
+  "template.duplicate",
+  "domain.create",
+  "domain.claim",
+  "domain.tracking_create",
+  "webhook.create",
+  "segment.create",
+  "contact_property.create",
+  "topic.create",
+  "api_key.create",
+  "automation.create",
+  "event_definition.create",
+  "site.asset_upload",
+  ...READS_THAT_WRITE
+];
+
 const READ_ACTION = /(^|_)(list|get|search|export|preview|render|validate|lint)(_|$)/;
 const WRITE_ACTION =
   /(^|_)(create|update|upsert|set|add|import|upload|duplicate|restore|apply|publish|unpublish|schedule|unschedule|enable|disable|verify|claim|send|resend|reply|delete|remove|revoke|cancel|archive|discard)(_|$)/;
@@ -167,6 +198,52 @@ test("a read-only tool is idempotent and not destructive", () => {
     if (!h.readOnlyHint) continue;
     assert.equal(h.idempotentHint, true, `${tool.name} is read only, so repeating it changes nothing`);
     assert.equal(h.destructiveHint, false, `${tool.name} is read only`);
+  }
+});
+
+test("every write is destructive unless it only adds something new", () => {
+  const additive = new Set(PURELY_ADDITIVE);
+  for (const tool of TOOLS) {
+    const h = hints(tool.name);
+    if (h.readOnlyHint) continue;
+    assert.equal(
+      h.destructiveHint,
+      !additive.has(tool.name),
+      additive.has(tool.name)
+        ? `${tool.name} only creates something new, so it is not destructive`
+        : `${tool.name} changes or deletes existing data, so it must be marked destructive`
+    );
+  }
+  // Each family the audit found marked non-destructive, by name.
+  for (const name of [
+    "issue.update_draft",
+    "issue.apply_ops",
+    "issue.unschedule",
+    "issue.publish_to_web",
+    "template.update",
+    "template.publish",
+    "template.restore_version",
+    "site.apply_ops",
+    "sender.update",
+    "sender.set_default",
+    "sender.create",
+    "email.reschedule",
+    "domain.verify",
+    "publication.domain_verify",
+    "contact.set_properties",
+    "automation.update",
+    "monetize.offer_upsert"
+  ]) {
+    assert.equal(hints(name).destructiveHint, true, name);
+  }
+});
+
+test("a tool named like an update, upsert, set, restore, publish or verify is destructive", () => {
+  const modifying = /(^|_)(update|upsert|set|restore|apply|publish|unschedule|reschedule|verify)(_|$)/;
+  const named = TOOLS.map((tool) => tool.name).filter((name) => modifying.test(action(name)));
+  assert.ok(named.includes("template.update") && named.includes("site.apply_ops"));
+  for (const name of named) {
+    assert.equal(hints(name).destructiveHint, true, `${name} modifies existing data`);
   }
 });
 
@@ -276,11 +353,10 @@ test("pinned judgment calls", () => {
   assert.equal(hints("issue.schedule").destructiveHint, true);
   // Publishing replaces live content that history never saved.
   assert.equal(hints("site.publish").destructiveHint, true);
-  assert.equal(hints("issue.publish_to_web").destructiveHint, false);
+  // Changes what the public archive shows for an existing post.
+  assert.equal(hints("issue.publish_to_web").destructiveHint, true);
   // Writes the LIVE row of a published page, not the draft.
   assert.equal(hints("site.page_upsert").destructiveHint, true);
-  // Placeholder only: no model runs and nothing is saved.
-  assert.equal(hints("ai.generate_draft").readOnlyHint, true);
   // Mutations that persist nothing.
   assert.equal(hints("issue.preview_draft").readOnlyHint, true);
   assert.equal(hints("automation.validate").readOnlyHint, true);
@@ -294,9 +370,10 @@ test("pinned judgment calls", () => {
   assert.equal(hints("domain.tracking_delete").openWorldHint, true);
   // A steps update to an active automation goes live at once and can email contacts.
   assert.equal(hints("automation.update").openWorldHint, true);
-  // Draft edits stay inside Mailtea and are not destructive.
+  // Draft edits overwrite saved work, so they are destructive, but they stay
+  // inside Mailtea until something sends or publishes them.
   for (const name of ["issue.update_draft", "issue.apply_ops", "site.apply_ops", "template.update"]) {
-    assert.equal(hints(name).destructiveHint, false, name);
+    assert.equal(hints(name).destructiveHint, true, name);
     assert.equal(hints(name).openWorldHint, false, name);
   }
 });

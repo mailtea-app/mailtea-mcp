@@ -78,7 +78,7 @@ export type McpRuntimeOptions = {
 
 type TrpcEnvelope<T> = {
   result?: { data?: T };
-  error?: { message?: string; data?: unknown };
+  error?: { message?: string; data?: { code?: unknown; httpStatus?: unknown } | null };
 };
 
 type IssueRecord = {
@@ -457,6 +457,26 @@ type SenderRemoveResult = {
   senderId: string;
 };
 
+/** A reusable section's content: editor nodes, each with its type. */
+const SECTION_CONTENT_SCHEMA = {
+  type: "array",
+  description: 'Editor nodes, for example [{"type":"paragraph","content":[{"type":"text","text":"Hi"}]}].',
+  items: { type: "object", properties: { type: { type: "string" } }, required: ["type"] },
+  minItems: 1
+} as const;
+
+/** INLINE_BODY_LIMIT as schema text: MCP_TOOLS is built before the helpers below. */
+const INLINE_BODY_LIMIT_TEXT = "20,000";
+
+/** suppression.export page size: default and ceiling (connector audit B5). */
+const SUPPRESSION_EXPORT_DEFAULT_ROWS = 500;
+const SUPPRESSION_EXPORT_MAX_ROWS = 2000;
+
+/** RFC 4180 field escaping, as the API's own CSV exports do it (apps/api csv.ts). */
+function csvField(value: string): string {
+  return /[",\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
+
 type SuppressionListResponse = {
   object: "list";
   data: Array<{
@@ -513,15 +533,10 @@ type SectionPackRestoreRevisionResult = {
 };
 
 type SectionImportResult = {
-  templateId: string;
+  presetId: string;
   createdCount: number;
   updatedCount: number;
   imported: ReusableSectionRecord[];
-};
-
-type AiDraft = {
-  title?: string;
-  content?: Array<{ type?: string; text?: string }>;
 };
 
 type AuthMe = {
@@ -597,7 +612,7 @@ const DEFAULT_API_BASE_URL = "https://api.mailtea.app";
 
 /** Required/optional `config` keys per step type. Inlined into tool descriptions. */
 const AUTOMATION_STEP_CONFIG_HELP =
-  "Step config by type. trigger: {trigger_type, trigger_key?, filter?}; delay: {duration, unit} (unit: seconds|minutes|hours|days|weeks, max 365 days); condition: {rule}; wait_for_event: {event_name, timeout_seconds, filter?} (max 90 days); send_email: {template_id, sender_id?, subject?, reply_to?, variables?}; topic_add: {topic_id}; topic_remove: {topic_id}; segment_add: {segment_id} (member-list segments only: a segment with a status_filter, query_filter or inactive_days is refused with segment_is_filter); segment_remove: {segment_id}; contact_update: {properties}; http_request: {url, method?, headers?, body?, timeout_seconds?}; exit: {reason?}.";
+  "Step config by type. trigger: {trigger_type, trigger_key?, filter?}; delay: {duration, unit} (unit: seconds|minutes|hours|days|weeks, max 365 days); condition: {rule}; wait_for_event: {event_name, timeout_seconds, filter?} (max 90 days); send_email: {template_id, sender_id?, subject?, reply_to?, variables?}; topic_add: {topic_id}; topic_remove: {topic_id}; segment_add: {segment_id} (member-list segments only: a segment with a status_filter, query_filter or inactive_days is refused with segment_is_filter); segment_remove: {segment_id}; contact_update: {properties}; http_request: {url, method?, headers?, body?, timeout_seconds?}; exit: {reason?}. An http_request step calls the URL the operator configures, which can be any third-party endpoint, when a contact reaches the step. Its response is not returned to the caller.";
 
 /** Trigger catalog, inlined into the graph-authoring tool descriptions. */
 const AUTOMATION_TRIGGER_HELP =
@@ -607,10 +622,10 @@ const AUTOMATION_TRIGGER_HELP =
 // only the first has to guess the rule node shape — it lives exclusively in the
 // second.
 const AUTOMATION_CATALOG_HELP =
-  "Two machine-readable resources back these tools: mailtea://automations/step-types is the catalog of trigger types, step types, config shapes, branch labels, limits and validation codes; mailtea://automations/condition-fields is the rule DSL a condition step's config.rule and any filter must follow — operators, addressable field namespaces, value references and the rule node shapes themselves. Read both before authoring a branching graph.";
+  "Two machine-readable resources back these tools: mailtea://automations/step-types is the catalog of trigger types, step types, config shapes, branch labels, limits and validation codes; mailtea://automations/condition-fields is the rule DSL a condition step's config.rule and any filter must follow: operators, addressable field namespaces, value references and the rule node shapes themselves. Both describe what a branching graph may contain.";
 
 const AUTOMATION_SNAKE_CASE_HELP =
-  "Arguments are snake_case — a deliberate deviation from the camelCase used by other Mailtea MCP tools, because the graph is forwarded to the REST API verbatim.";
+  "Arguments are snake_case (publication_id, automation_id), matching the Mailtea REST API.";
 
 /**
  * The `schema_json` grammar, inlined into both event_definition write tools and
@@ -635,7 +650,7 @@ const EVENT_SCHEMA_DOCUMENT_HELP = `schema_json is a Mailtea event schema docume
  * reason `AUTOMATION_STEPS_SCHEMA` keeps `config` flat: MCP clients vary in how
  * much JSON Schema they honour, and discriminated unions are where they break.
  */
-const EDITOR_DOC_HELP = `editor_doc is a TipTap/ProseMirror document — {"type":"doc","content":[ ...block nodes ]} — and the server renders the email HTML from it and stores that, so do NOT send html alongside it. Every node is {"type":"...","attrs":{...},"content":[...]}. Block nodes that render: paragraph, heading (attrs.level 1-6), bulletList / orderedList / listItem, blockquote, horizontalRule, image (attrs.src, attrs.alt), button (attrs.href, attrs.variant "filled"|"outline", attrs.alignment "left"|"center"|"right", attrs.fullWidth), spacer (attrs.height "sm"|"md"|"lg"|"xl"), table, twoColumns / threeColumns / fourColumns each wrapping columnsColumn children, linkCard, logo, footer, htmlCodeBlock, section. Text is {"type":"text","text":"..."} carrying optional marks: bold, italic, underline, strike, code, sub, sup, textStyle, and link (attrs.href). A "subtitle" string on the doc root becomes the inbox preview text. Minimal example: {"type":"doc","content":[{"type":"heading","attrs":{"level":1},"content":[{"type":"text","text":"Hello"}]},{"type":"paragraph","content":[{"type":"text","text":"Welcome aboard."}]}]}. These node types render to NOTHING in email and their content is lost: youtube, xPost, threadsPost, codeBlock (use htmlCodeBlock for raw HTML); repeat and showIfKey render their content once, without the repetition or the condition. A document that renders to an empty email is refused with 400 editor_doc_unrenderable, and the response names the offending types in node_types. Bounds: 512 KB serialized, 256 KB per string, 40 levels deep.`;
+const EDITOR_DOC_HELP = `editor_doc is a TipTap/ProseMirror document, {"type":"doc","content":[ ...block nodes ]}. The server renders the email HTML from it and stores that, and refuses a request that also carries html. Every node is {"type":"...","attrs":{...},"content":[...]}. Block nodes that render: paragraph, heading (attrs.level 1-6), bulletList / orderedList / listItem, blockquote, horizontalRule, image (attrs.src, attrs.alt), button (attrs.href, attrs.variant "filled"|"outline", attrs.alignment "left"|"center"|"right", attrs.fullWidth), spacer (attrs.height "sm"|"md"|"lg"|"xl"), table, twoColumns / threeColumns / fourColumns each wrapping columnsColumn children, linkCard, logo, footer, htmlCodeBlock, section. Text is {"type":"text","text":"..."} carrying optional marks: bold, italic, underline, strike, code, sub, sup, textStyle, and link (attrs.href). A "subtitle" string on the doc root becomes the inbox preview text. Minimal example: {"type":"doc","content":[{"type":"heading","attrs":{"level":1},"content":[{"type":"text","text":"Hello"}]},{"type":"paragraph","content":[{"type":"text","text":"Welcome aboard."}]}]}. These node types render to NOTHING in email and their content is lost: youtube, xPost, threadsPost, codeBlock (use htmlCodeBlock for raw HTML); repeat and showIfKey render their content once, without the repetition or the condition. A document that renders to an empty email is refused with 400 editor_doc_unrenderable, and the response names the offending types in node_types. Bounds: 512 KB serialized, 256 KB per string, 40 levels deep.`;
 
 /**
  * `editor_doc` plus the fidelity sidecars that `html` alone cannot carry. Shared
@@ -756,7 +771,7 @@ function assertTemplateVariableKeys(
 // exactly where they break. The per-type shape lives in the description instead.
 const AUTOMATION_STEPS_SCHEMA = {
   type: "array",
-  description: `Ordered list of steps. Exactly one step must have type "trigger". Max 100 steps. ${AUTOMATION_STEP_CONFIG_HELP}`,
+  description: `Ordered list of steps. Exactly one step must have type "trigger". Max 100 steps. Each step's config shape is on its config property.`,
   items: {
     type: "object",
     properties: {
@@ -1094,7 +1109,7 @@ const AUTOMATION_STEP_TYPE_CATALOG = {
  * it writes anything. Kept in one string so every site tool description can
  * point at the same vocabulary.
  */
-const SITE_DOC_HELP = `A publication has exactly ONE site, made of pages. A page document is {"version":3,"sections":[...]}; a section is {"id","type":"section","blocks":[...]}. Blocks are discriminated on "type": heading, text, richText, button, link, image, embed, logo (src ""=publication logo, heightPx, href), icon, divider, spacer, subscribeForm, contactForm, unsubscribeForm, postHeader, postBody, postCollection, group (children[]), columns (columns[i].blocks[]). Every style/layout property is {"ref":"palette.accent"} (linked to the theme) or {"value":24} (a literal override) — PREFER refs so the site re-themes coherently. Limits: 40 sections/page, 50 children per container, 200 nodes/page. Writes land on the DRAFT; the public site keeps serving the live version until site.publish.`;
+const SITE_DOC_HELP = `A publication has exactly ONE site, made of pages. A page document is {"version":3,"sections":[...]}; a section is {"id","type":"section","blocks":[...]}. Blocks are discriminated on "type": heading, text, richText, button, link, image, embed, logo (src ""=publication logo, heightPx, href), icon, divider, spacer, subscribeForm, contactForm, unsubscribeForm, postHeader, postBody, postCollection, group (children[]), columns (columns[i].blocks[]). Every style/layout property is {"ref":"palette.accent"} (linked to the theme) or {"value":24} (a literal override). A ref stays linked to the theme, so a later theme change restyles it. Limits: 40 sections/page, 50 children per container, 200 nodes/page. Writes land on the DRAFT; the public site keeps serving the live version until site.publish.`;
 
 /** The 12 theme tokens, mirrored from SITE_THEME_TOKEN_SPECS in @mailtea/contracts. */
 const SITE_THEME_TOKEN_PROPERTIES = {
@@ -1396,7 +1411,7 @@ const EMAIL_OP_SCHEMA = {
         deletes: {
           type: "array",
           description:
-            "Nodes to remove, each with everything inside it. Applied after every move. Each item is a path, or {path, expectType}. Prefer the object form: a delete whose path now holds a different node type is refused as stale_address instead of removing the wrong block.",
+            "Nodes to remove, each with everything inside it. Applied after every move. Each item is a path, or {path, expectType}. With the object form, a delete whose path now holds a different node type is refused as stale_address instead of removing the wrong block.",
           items: {
             anyOf: [
               { type: "string", description: "Path of the node to delete." },
@@ -1645,7 +1660,7 @@ const SITE_OP_SCHEMA = {
     {
       type: "object",
       description:
-        "set_navbar_template — replace the whole navbar with one from the curated library (see site.navbar_templates_list). Prefer this over hand-assembling a navbar node by node: a template is theme-linked, responsive, and carries its own mobile menu. It REPLACES the existing navbar.",
+        "set_navbar_template: replace the whole navbar with one from the curated library (see site.navbar_templates_list). Unlike a navbar assembled node by node, a template is theme-linked, responsive, and carries its own mobile menu. It REPLACES the existing navbar.",
       properties: {
         op: { type: "string", enum: ["set_navbar_template"] },
         templateId: {
@@ -1719,11 +1734,16 @@ export const SERVER_VERSION = "0.21.0";
  *
  * Shared object, referenced by every tool rather than copied, so the sentence
  * an agent reads cannot drift between two tools that mean the same thing.
+ *
+ * Kept to one short sentence: it is served once per tool, on 120 tools, so
+ * every word costs every conversation (connector audit S9). The full default
+ * rules (OAuth grant, publication-scoped key, MAILTEA_PUBLICATION_ID, the
+ * team-key default, no default for service keys) are on the docs page.
  */
 const PUBLICATION_ID_SCHEMA = {
   type: "string",
   description:
-    "Publication to act on. Optional: defaults to the publication this connection is authorized for (the OAuth grant's publication, a publication-scoped API key, MAILTEA_PUBLICATION_ID, or, for a team-scoped personal API key, the only publication its owner belongs to in that team). Service keys take no such default. Pass it when the key reaches more than one publication; the error then lists the ids it can take."
+    "Optional. Defaults to this connection's publication (for a team-scoped personal key, the only publication its owner has). If several are reachable, the error lists the ids."
 } as const;
 
 /**
@@ -1778,11 +1798,16 @@ const SEGMENT_INACTIVE_DAYS_HELP =
  *
  * - readOnlyHint: true only when the call changes nothing (reads, previews,
  *   dry runs). A read that creates rows on first use is not read only.
- * - destructiveHint: true when the call deletes or removes something, revokes
- *   access, cancels, discards unsaved work, changes a contact's consent or
- *   suppression, replaces live public content, or sends email (now, at a
- *   scheduled time, or by starting automations). Setting fields to new values
- *   is not destructive: the change is visible and can be set back.
+ * - destructiveHint: true for any call that changes or overwrites existing
+ *   data: every update, upsert, restore, publish and reschedule, as well as
+ *   deletes, removals, revocations, cancellations, discarded drafts, consent
+ *   and suppression changes, and sends (now, at a scheduled time, or by
+ *   starting automations). Only purely additive calls, which create something
+ *   new and touch nothing else, are not. Anthropic's connector review reads
+ *   it that way ("destructiveHint true for tools that modify or delete
+ *   data"), and so does the MCP spec, where false means "only additive
+ *   updates". `sender.create` is destructive because isDefault demotes the
+ *   current default sender.
  * - idempotentHint: true when repeating the call with the same arguments has
  *   no further effect: reads, set-to-value updates, upserts on a natural key,
  *   and deletes (the second finds nothing). Creates and sends are false, also
@@ -1881,7 +1906,7 @@ export const MCP_TOOLS = [
     name: "issue.get_editor",
     ...toolHints("Get draft editor state", { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
     description:
-      "Load the editor payload for a draft or scheduled issue. Returns `outline` — the document as a flat list of addressable blocks ({path, type, text}) — plus `styles` (current style tokens), `headers` (subject, previewText), `docBacked`, and `updatedAt`. READ THIS BEFORE issue.apply_ops: the paths in the outline are the addresses ops take, and `updatedAt` is what you pass as baseUpdatedAt. `docBacked: false` means the draft holds raw HTML, not an editable document — only a `compose` op can edit it.",
+      "Load the editor payload for a draft or scheduled issue. Returns `outline` (the document as a flat list of addressable blocks, {path, type, text}), `styles` (current style tokens), `headers` (subject, previewText), `docBacked`, and `updatedAt`. The outline paths are the addresses issue.apply_ops takes, and updatedAt is its baseUpdatedAt value. `docBacked: false` means the draft holds raw HTML, not an editable document, so only a `compose` op can edit it.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1893,9 +1918,9 @@ export const MCP_TOOLS = [
   {
     name: "issue.apply_ops",
     // Not idempotent: ops can insert or move blocks, and baseUpdatedAt is optional, so a repeat can apply them twice.
-    ...toolHints("Edit draft with operations", { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }),
+    ...toolHints("Edit draft with operations", { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }),
     description:
-      "Apply a batch of declarative edits to a draft email — the surgical alternative to issue.update_draft, which replaces the whole document. Use this to change one button's colour, rewrite a paragraph, reorder sections, or restyle the email without regenerating it. Every op is applied in order and answered with a report: {applied, skipped:[{opIndex, reason, path, detail}]}. A success with skips is the normal, honest outcome — READ THE REPORT, it is the only place a refused edit is named. Reasons: invalid_op, unknown_path, stale_address, unknown_block_kind, unknown_attr, bad_attr_value, unknown_style_token, bad_index, not_a_container, cycle, empty_edit, value_too_long (refused, never truncated), doc_full, not_email_safe, out_of_scope, internal_error. A structural op returns a fresh `outline` in the report — use it, every path you held may have moved. Call issue.get_editor first for the outline and updatedAt.",
+      "Apply a batch of declarative edits to a draft email, the surgical alternative to issue.update_draft, which replaces the whole document. Use this to change one button's colour, rewrite a paragraph, reorder sections, or restyle the email without regenerating it. Every op is applied in order and answered with a report: {applied, skipped:[{opIndex, reason, path, detail}]}. A success with skips is the normal, honest outcome. The report is the only place a refused edit is named. Reasons: invalid_op, unknown_path, stale_address, unknown_block_kind, unknown_attr, bad_attr_value, unknown_style_token, bad_index, not_a_container, cycle, empty_edit, value_too_long (refused, never truncated), doc_full, not_email_safe, out_of_scope, internal_error. A structural op returns a fresh `outline` in the report, and every path you held may have moved. The outline and updatedAt come from issue.get_editor.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1918,7 +1943,7 @@ export const MCP_TOOLS = [
     name: "email.lint",
     ...toolHints("Lint email HTML", { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
     description:
-      "Check email HTML against the Can I Email support matrix for the clients Mailtea refuses to regress (Apple Mail, Gmail, Outlook desktop). Returns {findings:[{slug, severity, feature, clients}], failCount, warnCount, strictClients, linted}. severity 'fail' means the layout BREAKS when unsupported (flex/grid collapse, absolute positioning, CSS variables, viewport units); 'warn' means it degrades gracefully (a gradient or shadow simply does not paint; a color-mix() color is dropped by Outlook desktop, so use a plain hex). Run this after writing an email. You cannot see the rendered result, and this is the check that catches what a preview would have shown you. Pass exactly one of issueId (lint what is saved) or html (lint before you post it).",
+      "Check email HTML against the Can I Email support matrix for the clients Mailtea refuses to regress (Apple Mail, Gmail, Outlook desktop). Returns {findings:[{slug, severity, feature, clients}], failCount, warnCount, strictClients, linted}. severity 'fail' means the layout BREAKS when unsupported (flex/grid collapse, absolute positioning, CSS variables, viewport units); 'warn' means it degrades gracefully (a gradient or shadow simply does not paint; a color-mix() color is dropped by Outlook desktop, so use a plain hex). It catches layout problems that are otherwise only visible in a rendered preview. Pass exactly one of issueId (lint what is saved) or html (lint before you post it).",
     inputSchema: {
       type: "object",
       properties: {
@@ -1935,7 +1960,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "issue.update_draft",
-    ...toolHints("Update email draft", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
+    ...toolHints("Update email draft", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }),
     description:
       "Update an existing draft issue. Only the fields you pass change: pass title to change the subject, name to rename the post, from/replyTo to set its sender headers, segmentId to choose its audience (null sends it to all active contacts again), or contentHtml/contentSpec to replace the whole document (use issue.apply_ops for targeted edits). Pass baseUpdatedAt (from issue.get_editor) so your write never overwrites a change someone made since; on a 'changed elsewhere' conflict, re-read with issue.get_editor and retry. A draft replaced with contentHtml stays HTML: the Visual Email Designer shows it read-only until the operator chooses Edit as blocks, and opening it changes nothing.",
     inputSchema: {
@@ -1983,12 +2008,13 @@ export const MCP_TOOLS = [
   {
     name: "issue.list_recent",
     ...toolHints("List recent issues", { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
-    description: "List recent issues for a publication",
+    description: "List a publication's issues, most recently updated first. Page with limit and offset.",
     inputSchema: {
       type: "object",
       properties: {
         publicationId: PUBLICATION_ID_SCHEMA,
-        limit: { type: "number" }
+        limit: { type: "number", description: "Issues per page, 1 to 50 (default 10)." },
+        offset: { type: "number", description: "Issues to skip, for the next page (default 0)." }
       }
     }
   },
@@ -2038,7 +2064,7 @@ export const MCP_TOOLS = [
   {
     name: "publication.domain_upsert",
     // Open world, like domain.create: provisions the sending identity, checks RDAP and public DNS, and attaches the public site edge.
-    ...toolHints("Add or update website domain", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }),
+    ...toolHints("Add or update website domain", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }),
     description: "Create or update a publication custom domain",
     inputSchema: {
       type: "object",
@@ -2053,22 +2079,22 @@ export const MCP_TOOLS = [
   },
   {
     name: "publication.domain_verify",
-    // Open world: without a verificationValue it looks the TXT record up in public DNS.
-    ...toolHints("Verify website domain", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }),
-    description: "Mark a publication domain as verified",
+    // Open world: looks the TXT record up in public DNS.
+    ...toolHints("Verify website domain", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }),
+    description:
+      "Check the website domain's verification TXT record in public DNS and mark the domain verified when it matches. Mailtea looks the record up itself; publish the TXT name and value that publication.domain_upsert returned first.",
     inputSchema: {
       type: "object",
       properties: {
         publicationId: PUBLICATION_ID_SCHEMA,
-        domainId: { type: "string" },
-        verificationValue: { type: "string" }
+        domainId: { type: "string" }
       },
       required: ["domainId"]
     }
   },
   {
     name: "publication.domain_set_primary",
-    ...toolHints("Set primary website domain", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
+    ...toolHints("Set primary website domain", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }),
     description: "Set an existing publication domain as primary",
     inputSchema: {
       type: "object",
@@ -2119,7 +2145,7 @@ export const MCP_TOOLS = [
   {
     name: "sender.create",
     // Idempotent: (publication, email) is unique, so a repeat is refused and changes nothing.
-    ...toolHints("Create sender", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
+    ...toolHints("Create sender", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }),
     description:
       "Create a named sender. The email domain must be a verified, DKIM-verified sending domain of the publication. The built-in '{slug}.mailtea.email' host is REFUSED here: it can only ever email verified members of the team, so a sender on it would be refused on every real send. Verify a domain first (domain.create).",
     inputSchema: {
@@ -2136,7 +2162,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "sender.update",
-    ...toolHints("Update sender", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
+    ...toolHints("Update sender", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }),
     description: "Update a sender's name, reply-to, or default flag. Email is immutable.",
     inputSchema: {
       type: "object",
@@ -2152,7 +2178,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "sender.set_default",
-    ...toolHints("Set default sender", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
+    ...toolHints("Set default sender", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }),
     description: "Make a sender the publication's default from-identity",
     inputSchema: {
       type: "object",
@@ -2209,10 +2235,16 @@ export const MCP_TOOLS = [
     name: "suppression.export",
     ...toolHints("Export suppression list", { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
     description:
-      "Export the organization's entire suppression list as CSV (columns: email, reason, source, created_at). Returns the CSV text in 'csv'.",
+      "Export the team's suppression list as CSV (columns: email, reason, source, created_at), newest first, one page at a time. Returns the CSV text in 'csv', the page's row count in 'rowCount', and 'nextCursor': pass it back as cursor for the next page, null on the last page.",
     inputSchema: {
       type: "object",
-      properties: {}
+      properties: {
+        limit: {
+          type: "number",
+          description: `Rows in this page, 1 to ${SUPPRESSION_EXPORT_MAX_ROWS} (default ${SUPPRESSION_EXPORT_DEFAULT_ROWS}).`
+        },
+        cursor: { type: "string", description: "nextCursor from the previous page; omit for the first page." }
+      }
     }
   },
   {
@@ -2359,7 +2391,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "contact.referral_milestone_upsert",
-    ...toolHints("Create or update referral milestone", { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }),
+    ...toolHints("Create or update referral milestone", { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }),
     description: "Create or update a referral milestone rule",
     inputSchema: {
       type: "object",
@@ -2417,7 +2449,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "monetize.offer_upsert",
-    ...toolHints("Create or update sponsor offer", { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }),
+    ...toolHints("Create or update sponsor offer", { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }),
     description: "Create or update a sponsor offer",
     inputSchema: {
       type: "object",
@@ -2525,7 +2557,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "section.pack_update",
-    ...toolHints("Update section pack", { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }),
+    ...toolHints("Update section pack", { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }),
     description: "Update a custom marketplace pack",
     inputSchema: {
       type: "object",
@@ -2587,7 +2619,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "section.pack_restore_revision",
-    ...toolHints("Restore section pack revision", { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }),
+    ...toolHints("Restore section pack revision", { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }),
     description: "Restore a custom marketplace pack to a specific revision",
     inputSchema: {
       type: "object",
@@ -2602,12 +2634,16 @@ export const MCP_TOOLS = [
   {
     name: "section.import_pack",
     ...toolHints("Import section pack", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }),
-    description: "Import a marketplace pack into reusable sections",
+    description:
+      "Import a section pack into the publication's reusable sections. A section whose name matches one already saved is overwritten; the rest are created.",
     inputSchema: {
       type: "object",
       properties: {
         publicationId: PUBLICATION_ID_SCHEMA,
-        templateId: { type: "string" }
+        templateId: {
+          type: "string",
+          description: "The pack's id, as section.catalog lists it: a shared pack or one of this publication's custom packs."
+        }
       },
       required: ["templateId"]
     }
@@ -2621,29 +2657,21 @@ export const MCP_TOOLS = [
       properties: {
         publicationId: PUBLICATION_ID_SCHEMA,
         name: { type: "string" },
-        contentJson: {
-          type: "array",
-          items: { type: "object" },
-          minItems: 1
-        }
+        contentJson: SECTION_CONTENT_SCHEMA
       },
       required: ["name", "contentJson"]
     }
   },
   {
     name: "section.update",
-    ...toolHints("Update saved section", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
+    ...toolHints("Update saved section", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }),
     description: "Update a reusable section snippet",
     inputSchema: {
       type: "object",
       properties: {
         sectionId: { type: "string" },
         name: { type: "string" },
-        contentJson: {
-          type: "array",
-          items: { type: "object" },
-          minItems: 1
-        }
+        contentJson: SECTION_CONTENT_SCHEMA
       },
       required: ["sectionId", "name", "contentJson"]
     }
@@ -2663,7 +2691,7 @@ export const MCP_TOOLS = [
   {
     name: "issue.preview",
     ...toolHints("Preview issue", { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
-    description: "Preview newsletter HTML for an issue",
+    description: "Preview newsletter HTML for an issue. HTML over 20,000 characters is cut with a marker.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2675,7 +2703,7 @@ export const MCP_TOOLS = [
   {
     name: "issue.preview_draft",
     ...toolHints("Preview unsaved draft", { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
-    description: "Preview newsletter HTML/text for unsaved draft content",
+    description: "Preview newsletter HTML and text for unsaved draft content. Each over 20,000 characters is cut with a marker.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2869,7 +2897,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "issue.unschedule",
-    ...toolHints("Unschedule issue", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
+    ...toolHints("Unschedule issue", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }),
     description: "Cancel an issue schedule and move it back to draft",
     inputSchema: {
       type: "object",
@@ -2881,8 +2909,8 @@ export const MCP_TOOLS = [
   },
   {
     name: "issue.publish_to_web",
-    // Open world: the post becomes public. Not destructive: issue.unpublish_from_web takes it down again.
-    ...toolHints("Publish issue to website", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }),
+    // Open world: the post becomes public. Destructive: it changes what the public archive shows for an existing post (issue.unpublish_from_web takes it down again).
+    ...toolHints("Publish issue to website", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }),
     description:
       "Publish an issue to the publication's public website, making it readable on the web (typically a sent issue). Newsletters only: a broadcast is email only, and publishing one is refused.",
     inputSchema: {
@@ -2940,26 +2968,6 @@ export const MCP_TOOLS = [
     }
   },
   {
-    name: "ai.generate_draft",
-    // Read only: returns a placeholder scaffold, runs no model and saves nothing.
-    ...toolHints("Generate draft scaffold", { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
-    description:
-      "Return a placeholder scaffold for a draft: a title taken from the prompt and one placeholder paragraph. No AI model runs on Mailtea's side, it does not write copy, and nothing is saved. To make a real draft, write the email yourself (the newsletter.draft_from_brief prompt sets that up) and save it with issue.create_draft.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        publicationId: PUBLICATION_ID_SCHEMA,
-        prompt: { type: "string", description: "What the email is about. Used for the scaffold's title." },
-        tone: {
-          type: "string",
-          enum: ["neutral", "friendly", "formal"],
-          description: "Accepted for compatibility. The scaffold does not change with it."
-        }
-      },
-      required: ["prompt"]
-    }
-  },
-  {
     name: "template.create",
     ...toolHints("Create template", { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }),
     description: `Create an email template. Exactly ONE content source: editor_doc, spec, or html. editor_doc (format "editor") is the same designed template the Visual Email Designer produces and the one to reach for when composing a real email. ${EDITOR_DOC_HELP} spec (format "spec") is the programmatic alternative for generated layouts; available components: Html, Head, Body, Container, Section, Row, Column, Heading, Text, Link, Button, Image, Hr, Preview, Markdown, MailteaHeader, MailteaFooter, MailteaSpacer, MailteaContentBlock. html (format "html") stores raw HTML verbatim. Whichever you use, the template ends up with stored html, so it is sendable from all three. Templates start as draft, so call template.publish before an automation or issue can use one. Sends read the PUBLISHED version (the content, From and Reply-To as of the last template.publish), never later unpublished edits.`,
@@ -3010,14 +3018,18 @@ export const MCP_TOOLS = [
       type: "object",
       properties: {
         publicationId: PUBLICATION_ID_SCHEMA,
-        templateId: { type: "string" }
+        templateId: { type: "string" },
+        html_offset: {
+          type: "number",
+          description: `Where the returned html starts, in characters (default 0). html is returned ${INLINE_BODY_LIMIT_TEXT} characters at a time; a longer one ends with a marker naming the next offset.`
+        }
       },
       required: ["templateId"]
     }
   },
   {
     name: "template.update",
-    ...toolHints("Update template", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
+    ...toolHints("Update template", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }),
     description: `Update an email template. Pass only the fields to change. Providing spec re-renders email-safe HTML server-side; providing html switches the template to raw HTML; providing editor_doc switches it to format "editor" and re-renders. ${EDITOR_DOC_HELP} Sending html for a template that is ALREADY format "editor" is refused with 400 editor_template_html_not_accepted, since its html is derived and accepting raw html would orphan the design source; send editor_doc instead. The sidecars are sticky: a patch carrying only editor_doc keeps the stored style_profile / mailtea_theme / global_css, and a patch carrying only a sidecar re-bakes the html from the STORED doc, so the rendered email never drifts from the stored styling. Call template.get first to read the current editor_doc. Editing a PUBLISHED template no longer unpublishes it: the change is saved as the working copy and the template keeps its published status and its published version keeps sending, with has_unpublished_versions: true on the response. That includes from, reply_to and style_profile: they are part of the published version too, so a new sender, reply-to address or page style reaches sends only after the next publish. Call template.publish to make the edit live. Pass base_revision (the revision from your last read) so your edit never overwrites a change someone made since; on a 409 stale_write, re-read with template.get and retry.`,
     inputSchema: {
       type: "object",
@@ -3071,8 +3083,8 @@ export const MCP_TOOLS = [
   },
   {
     name: "template.publish",
-    // Not destructive: every version is kept (template.versions), and template.unpublish reverses it.
-    ...toolHints("Publish template", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
+    // Destructive: it replaces the version that sends and that automations use. Every version is kept (template.versions), and template.unpublish reverses it.
+    ...toolHints("Publish template", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }),
     description:
       "Publish an email template: its saved changes, including from and reply_to, become the version that sends. Only a published template can seed an issue, a post, or an automation's send_email step. Calling this on a template that is ALREADY published is how saved edits go live: editing or restoring a published template no longer publishes automatically (see template.update, template.restore_version). The change is saved with has_unpublished_versions: true, and this call is what promotes it. Reversible with template.unpublish. Pass base_revision to publish only the revision you read, never a change someone made since.",
     inputSchema: {
@@ -3125,7 +3137,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "template.restore_version",
-    ...toolHints("Restore template version", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
+    ...toolHints("Restore template version", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }),
     description:
       "Put an older design from template.versions back onto the template, with the version's from and reply_to: the From and Reply-To come back too, including a null that clears them. A version with sender_recorded: false was recorded before versions kept the sender and leaves the current From and Reply-To as they are. ON A LIVE TEMPLATE: restoring is a content write, but it no longer returns the template to draft or stops it sending. The template stays published, the restored design is saved as its working copy (has_unpublished_versions: true on the returned template), and automations, issues and the API keep sending the CURRENTLY PUBLISHED version until template.publish is called to make the restored design live. The unpublished field on the response is kept for older clients and is always false now; read has_unpublished_versions or message instead. History is FORWARD-ONLY: a restore never rewinds, truncates or reorders the list. It first records the design it is about to replace as its own version, then appends the restored design as the new newest version, so a restore is itself undoable: restore the entry directly above the one you just restored. Restoring the design that is already current is a no-op: nothing is written, and the reply is restored: false with reason \"identical\" and unpublished: false. Only the newest versions are kept (see retention on template.versions) and consecutive edits by the same author through the same channel (Studio, or one API key) inside the coalesce window collapse into one entry, so a version can age out of history: asking for one that has returns 404 with code template_version_not_found. Returns { restored, restored_from_version, unpublished, message, template }.",
     inputSchema: {
@@ -3313,7 +3325,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "email.reschedule",
-    ...toolHints("Reschedule email", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
+    ...toolHints("Reschedule email", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }),
     description: "Reschedule a still-scheduled transactional email to a new time.",
     inputSchema: {
       type: "object",
@@ -3363,7 +3375,9 @@ export const MCP_TOOLS = [
             "complained",
             "failed",
             "scheduled",
-            "canceled"
+            "canceled",
+            "delivery_delayed",
+            "suppressed"
           ],
           description: "Filter by delivery status."
         },
@@ -3425,7 +3439,7 @@ export const MCP_TOOLS = [
     name: "email.inbound_get",
     ...toolHints("Get inbound email", { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
     description:
-      "Retrieve a single inbound email by id (rxemail_) — headers, html/text body, a signed download URL for the raw message, and its attachments. Tenancy is resolved from the id, so no publicationId is needed.",
+      "Retrieve a single inbound email by id (rxemail_): headers, html and text body, a signed download URL for the raw message, and its attachments. A body over 20,000 characters is cut with a marker; the raw message has all of it. Tenancy is resolved from the id, so no publicationId is needed.",
     inputSchema: {
       type: "object",
       properties: { id: { type: "string", description: "Inbound email id (rxemail_)." } },
@@ -3597,9 +3611,9 @@ export const MCP_TOOLS = [
   {
     name: "domain.verify",
     // Open world: looks the domain's records up in public DNS.
-    ...toolHints("Verify domain", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }),
+    ...toolHints("Verify domain", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }),
     description:
-      "Check a domain's DNS and report its verification state. Sending is gated on two parts: the ownership TXT record must verify (which sets status to 'verified') AND the branded DKIM TXT record must verify. Ownership verification alone does NOT make a domain sendable. The response now includes 'dkim_status' and 'receiving_mx_found' so you can confirm both before sending. Verify is also what settles the MX row in 'records': the answer is stored, so every later read of the domain reports what this verify found rather than 'pending'. The response also carries 'receiving_identity_status' (pending, verified, failed, or null when not started): whether the domain is registered to RECEIVE mail at Mailtea's inbound endpoint. Tell the user to point their MX at Mailtea only once it reads 'verified'.",
+      "Check a domain's DNS and report its verification state. Sending is gated on two parts: the ownership TXT record must verify (which sets status to 'verified') AND the branded DKIM TXT record must verify. Ownership verification alone does NOT make a domain sendable. The response now includes 'dkim_status' and 'receiving_mx_found' so you can confirm both before sending. Verify is also what settles the MX row in 'records': the answer is stored, so every later read of the domain reports what this verify found rather than 'pending'. The response also carries 'receiving_identity_status' (pending, verified, failed, or null when not started): whether the domain is registered to RECEIVE mail at Mailtea's inbound endpoint. An MX record pointing at Mailtea only receives mail once it reads 'verified'.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3674,7 +3688,7 @@ export const MCP_TOOLS = [
     // Idempotent: a second claim while one is pending is refused.
     ...toolHints("Claim domain", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
     description:
-      "Claim a domain that another publication currently holds. Use this ONLY after domain.create was refused with code 'domain_held_elsewhere'. Returns one TXT record in 'records' — the operator must publish it in the domain's DNS to prove they control it, then call domain.claim_verify. The claim expires if it is not verified within 72 hours. Completing a claim releases the other publication's domain: their sending stops, and they are notified by email that the host was released and told how to claim it back. Do not open one for a domain you do not control.",
+      "Claim a domain that another publication currently holds. It is for a domain that domain.create refused with code 'domain_held_elsewhere'. Returns one TXT record in 'records': the operator publishes it in the domain's DNS to prove they control it, then call domain.claim_verify. The claim expires if it is not verified within 72 hours. Completing a claim releases the other publication's domain: their sending stops, and they are notified by email that the host was released and told how to claim it back. A claim completes only for someone who can publish the TXT record in the domain's DNS.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3852,7 +3866,7 @@ export const MCP_TOOLS = [
   {
     name: "webhook.update",
     // Open world: can point event data at a different outside URL.
-    ...toolHints("Update webhook", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }),
+    ...toolHints("Update webhook", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }),
     description: "Update a webhook's endpoint, subscribed events, or enabled/disabled status.",
     inputSchema: {
       type: "object",
@@ -3930,7 +3944,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "segment.update",
-    ...toolHints("Update segment", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
+    ...toolHints("Update segment", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }),
     description: "Update an audience segment's name, description, or filters.",
     inputSchema: {
       type: "object",
@@ -4005,7 +4019,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "contact_property.update",
-    ...toolHints("Update contact property", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
+    ...toolHints("Update contact property", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }),
     description: "Update a custom contact property's fallback value or description.",
     inputSchema: {
       type: "object",
@@ -4071,7 +4085,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "contact.set_properties",
-    ...toolHints("Set contact properties", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
+    ...toolHints("Set contact properties", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }),
     description:
       "Set a contact's custom property values — the data behind {{contact.<key>}} merge tags. " +
       "Defining a property (contact_property.create) only creates the field; this puts a value on a contact. " +
@@ -4150,7 +4164,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "topic.update",
-    ...toolHints("Update topic", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
+    ...toolHints("Update topic", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }),
     description: "Update a topic definition's name, description, default subscription, or visibility.",
     inputSchema: {
       type: "object",
@@ -4238,7 +4252,7 @@ export const MCP_TOOLS = [
   {
     name: "automation.create",
     ...toolHints("Create automation", { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }),
-    description: `Create an automation — a triggered email journey graph — in draft status. ${AUTOMATION_SNAKE_CASE_HELP} ${AUTOMATION_TRIGGER_HELP} ${AUTOMATION_STEP_CONFIG_HELP} Failures come back as coded issues[], not zod errors; pass validate_only to rehearse a graph before committing it. ${AUTOMATION_CATALOG_HELP}`,
+    description: `Create an automation (a triggered email journey graph) in draft status. ${AUTOMATION_SNAKE_CASE_HELP} ${AUTOMATION_TRIGGER_HELP} Failures come back as coded issues[], not zod errors; pass validate_only to rehearse a graph before committing it. ${AUTOMATION_CATALOG_HELP}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -4302,8 +4316,8 @@ export const MCP_TOOLS = [
   {
     name: "automation.update",
     // Open world: a steps update to an ACTIVE automation goes live at once and can email contacts.
-    ...toolHints("Update automation", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }),
-    description: `Update an automation. Pass only the fields to change; passing steps replaces the whole graph and cuts a new version. Fields you omit keep their STORED value, so reentry_window_seconds must be sent as null to clear it. Switching reentry_policy from once_per_window to once or always without doing so fails with "reentry_window_seconds is only valid when reentry_policy is once_per_window" on this and every later call. Saving is never blocked for draft/paused/archived automations: issues ride along informationally. A graph update to an ACTIVE automation is refused with 422 active_graph_invalid only when it adds an error the live version does not already have (issues[] lists just those new ones; issues already live carry pre_existing: true and do not block). Changing the trigger (trigger_type or trigger_key) of an ACTIVE automation is refused with 422 trigger_locked_while_active: pause it first, then change the trigger. Pass base_version with steps (the version from your last read) so your graph never overwrites steps someone saved since; on a 409 stale_version, re-read with automation.get and retry. ${AUTOMATION_SNAKE_CASE_HELP} ${AUTOMATION_STEP_CONFIG_HELP} ${AUTOMATION_CATALOG_HELP}`,
+    ...toolHints("Update automation", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }),
+    description: `Update an automation. Pass only the fields to change; passing steps replaces the whole graph and cuts a new version. Fields you omit keep their STORED value, so reentry_window_seconds must be sent as null to clear it. Switching reentry_policy from once_per_window to once or always without doing so fails with "reentry_window_seconds is only valid when reentry_policy is once_per_window" on this and every later call. Saving is never blocked for draft/paused/archived automations: issues ride along informationally. A graph update to an ACTIVE automation is refused with 422 active_graph_invalid only when it adds an error the live version does not already have (issues[] lists just those new ones; issues already live carry pre_existing: true and do not block). Changing the trigger (trigger_type or trigger_key) of an ACTIVE automation is refused with 422 trigger_locked_while_active: pause it first, then change the trigger. Pass base_version with steps (the version from your last read) so your graph never overwrites steps someone saved since; on a 409 stale_version, re-read with automation.get and retry. ${AUTOMATION_SNAKE_CASE_HELP} ${AUTOMATION_CATALOG_HELP}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -4339,7 +4353,7 @@ export const MCP_TOOLS = [
   {
     name: "automation.validate",
     ...toolHints("Validate automation graph", { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
-    description: `Validate a graph without creating anything — the standalone dry run for a graph with no automation in existence yet. Returns {valid, issues[]} with the same coded issues a create or update failure returns. ${AUTOMATION_SNAKE_CASE_HELP} ${AUTOMATION_STEP_CONFIG_HELP} ${AUTOMATION_CATALOG_HELP}`,
+    description: `Validate a graph without creating anything: the standalone dry run for a graph with no automation in existence yet. Returns {valid, issues[]} with the same coded issues a create or update failure returns. ${AUTOMATION_SNAKE_CASE_HELP} ${AUTOMATION_CATALOG_HELP}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -4454,7 +4468,7 @@ export const MCP_TOOLS = [
 
 READING THE RESPONSE — three points, each of which otherwise produces a confidently wrong answer:
 - version vs graph_version. \`version\`/\`version_id\` say what the numbers are SCOPED to, and are NULL whenever no \`version\` was passed, because the aggregate then spans every version. \`graph_version\`/\`graph_version_id\` say only which graph supplied the step LABELS (the live version). State the scope from \`version\`, and say "all versions" when it is null — quoting \`graph_version\` as the scope captions combined v1+v2 traffic as a single version.
-- \`steps[]\` is keyed on (step_key, step_type), NOT on step_key alone. A key deleted as one step type and later re-added as another appears as two entries with the same \`step_key\` in an all-versions aggregate. Do not merge or de-duplicate them by key; they are different steps.
+- \`steps[]\` is keyed on (step_key, step_type), NOT on step_key alone. A key deleted as one step type and later re-added as another appears as two entries with the same \`step_key\` in an all-versions aggregate. They are different steps, even though they share a key.
 - \`email.delivered\` means CURRENTLY delivered — accepted and not subsequently bounced — so delivered + bounced never exceeds sent. It is not a running total of everything ever accepted. ${AUTOMATION_SNAKE_CASE_HELP}`,
     inputSchema: {
       type: "object",
@@ -4606,7 +4620,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
   },
   {
     name: "event_definition.update",
-    ...toolHints("Update event definition", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
+    ...toolHints("Update event definition", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }),
     description: `Update an event definition's description or schema. The event name is immutable — renaming is refused with event_name_immutable. Omitting schema_json leaves the stored schema untouched; passing schema_json: null CLEARS it and returns the event to free-form. ${EVENT_SCHEMA_DOCUMENT_HELP} ${AUTOMATION_SNAKE_CASE_HELP}`,
     inputSchema: {
       type: "object",
@@ -4639,7 +4653,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
   {
     name: "site.get",
     ...toolHints("Get website", { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
-    description: `Load the publication's website: settings, the v3 design (theme tokens, navbar, footer), the operator's design brief, and draftVersion. The navbar and footer node ids it returns are addressable by edit_copy and edit_style, so this is where you find them — but both trees are shared by EVERY page, so never put page-specific copy in them, and arrange refuses them. START HERE — the design brief is the operator's standing instruction for how the site should look and MUST be followed, and draftVersion is the token every write passes back as baseVersion. ${SITE_DOC_HELP}`,
+    description: `Load the publication's website: settings, the v3 design (theme tokens, navbar, footer), the design brief, and draftVersion. The navbar and footer node ids it returns are the ones edit_copy and edit_style address. Both trees are shared by every page, so copy placed in them shows on every page, and arrange does not move them. The design brief is free text the publication's team saved to describe the site's intended look. draftVersion is the value each site write passes back as baseVersion. The page document format is described on site.page_upsert.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -4664,7 +4678,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     name: "site.page_get",
     // Not read only: reads through the same page list, which creates the reserved pages on first use.
     ...toolHints("Get website page", { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
-    description: `Load one page with its full document, draft-coalesced (what the builder shows, not what the public site serves). Address it by pageId, slug, or kind. Read this before addressing nodes by id in site.apply_ops. ${SITE_DOC_HELP}`,
+    description: `Load one page with its full document, draft-coalesced (what the builder shows, not what the public site serves). Address it by pageId, slug, or kind. Node ids for site.apply_ops come from this document. The page document format is described on site.page_upsert.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -4683,7 +4697,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     name: "site.page_upsert",
     // Destructive and open world: writes the page's LIVE row, not the draft, so a published page changes for visitors at once and its old document is replaced.
     ...toolHints("Create or replace website page", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }),
-    description: `Create or replace a WHOLE page document. Reserved kinds are home, archive, post, subscribe and the unsubscribe pair; anything else is kind "custom" — an ordinary page at a slug of your choosing. (/subscribe is served from a built-in document and needs no page.) A custom page is created as a DRAFT unless you pass status "published", because building is unlimited on every plan while PUBLISHING is capped by plan (free 1, hobby 5, pro 25) — an over-cap publish is refused with a message naming the limit. A custom page also may not take a reserved slug: the public route resolves by slug alone, so "archive" would collide with the real archive. Prefer site.apply_ops for edits — this write goes through a total parser that silently REPAIRS what it cannot accept (clamping values, dropping unknown properties and overflow past the 40-section / 50-child / 200-node caps), so a success response does NOT mean the document was stored as sent. Read the page back with site.page_get and diff it. Note this writes the LIVE row for content ('draft' status keeps a page off the public site), not the draft column. ${SITE_DOC_HELP}`,
+    description: `Create or replace a WHOLE page document. Reserved kinds are home, archive, post, subscribe and the unsubscribe pair; anything else is kind "custom", an ordinary page at a slug of your choosing. (/subscribe is served from a built-in document and needs no page.) A custom page is created as a DRAFT unless you pass status "published", because building is unlimited on every plan while PUBLISHING is capped by plan (free 1, hobby 5, pro 25): an over-cap publish is refused with a message naming the limit. A custom page also may not take a reserved slug: the public route resolves by slug alone, so "archive" would collide with the real archive. site.apply_ops is the edit path that reports each refused edit. This write goes through a total parser that silently REPAIRS what it cannot accept (clamping values, dropping unknown properties and overflow past the 40-section / 50-child / 200-node caps), so a success response does NOT mean the document was stored as sent; site.page_get returns what was stored. Note this writes the LIVE row for content ('draft' status keeps a page off the public site), not the draft column. ${SITE_DOC_HELP}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -4732,8 +4746,8 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
   {
     name: "site.apply_ops",
     // Not idempotent: ops can insert or move nodes, and baseVersion is optional.
-    ...toolHints("Edit website draft", { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }),
-    description: `Apply a batch of declarative edits to the site DRAFT — the safe way to design a site. Every op is applied in order and answered with a report: {applied, skipped:[{opIndex, op, reason, detail}]}. A 200 with skips is the normal, honest outcome — READ THE REPORT, it is the only place a refused edit is named. Reasons: unknown_template, unknown_node, unknown_slot_key, unknown_slot_field, copy_shape_mismatch, repeat_out_of_bounds, value_too_long (refused, never truncated), bad_index, page_full, no_design, unknown_token, bad_token_value, unknown_style_prop, empty_edit, not_a_container, cycle, extract_failed, invalid_op. Compose from templates (site.section_templates_list) rather than hand-authoring blocks. ${SITE_DOC_HELP}`,
+    ...toolHints("Edit website draft", { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }),
+    description: `Apply a batch of declarative edits to the site DRAFT, the safe way to design a site. Every op is applied in order and answered with a report: {applied, skipped:[{opIndex, op, reason, detail}]}. A 200 with skips is the normal, honest outcome. The report is the only place a refused edit is named. Reasons: unknown_template, unknown_node, unknown_slot_key, unknown_slot_field, copy_shape_mismatch, repeat_out_of_bounds, value_too_long (refused, never truncated), bad_index, page_full, no_design, unknown_token, bad_token_value, unknown_style_prop, empty_edit, not_a_container, cycle, extract_failed, invalid_op. Section templates from site.section_templates_list can be inserted by id. ${SITE_DOC_HELP}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -4778,7 +4792,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     name: "site.navbar_templates_list",
     ...toolHints("List navbar templates", { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
     description:
-      "The curated navbar library: every navbar template with its id, name, description, and mobile behaviour. Apply one with the `set_navbar_template` op in site.apply_ops. Prefer this over hand-assembling a navbar node by node — structural ops do not address the site chrome, and a hand-built navbar has no distribution control, so it tends to rely on fixed-width spacers that break on a phone. A template is theme-linked and carries its own mobile menu.",
+      "The curated navbar library: every navbar template with its id, name, description, and mobile behaviour. Apply one with the `set_navbar_template` op in site.apply_ops. Structural ops do not address the site chrome, and a hand-built navbar has no distribution control, so it tends to rely on fixed-width spacers that break on a phone. A template is theme-linked and carries its own mobile menu.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4790,7 +4804,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     name: "site.section_templates_list",
     ...toolHints("List section templates", { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
     description:
-      "The curated Section Library: every insertable section template with its id, category, name, description, and slots. Slots are the contract for copy — a value slot takes a string under its key, a repeat slot takes a list of item maps (its itemSlots name the per-item keys, min/max bound the count). A template with no slots is a structural scaffold, inserted as authored. Read this before composing with site.apply_ops; a templateId not in this list is skipped as unknown_template.",
+      "The curated Section Library: every insertable section template with its id, category, name, description, and slots. Slots are the contract for copy: a value slot takes a string under its key, a repeat slot takes a list of item maps (its itemSlots name the per-item keys, min/max bound the count). A template with no slots is a structural scaffold, inserted as authored. site.apply_ops skips a templateId that is not in this list, with reason unknown_template.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4802,7 +4816,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     name: "site.design_brief_get",
     ...toolHints("Get design brief", { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
     description:
-      "Read the operator's design brief — standing brand and layout guardrails in markdown that every design change must respect. Empty means no brief has been written yet.",
+      "Return the design brief saved for this publication's site: free text in markdown, written in Mailtea Studio or with site.design_brief_set, describing the intended brand and layout. Empty when none is saved.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4814,7 +4828,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     name: "site.design_brief_set",
     ...toolHints("Set design brief", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }),
     description:
-      "Write the operator's design brief (markdown, max 10000 chars) — the durable record of the site's visual direction, read on every later design turn. Pass null to clear it. Replaces the whole brief: read it first and edit, don't overwrite work you did not author.",
+      "Replace the site's design brief with new markdown (max 10000 chars), or clear it with null. The whole brief is replaced and the previous text is not kept.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4832,7 +4846,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     // Open world: puts the draft live for visitors. Destructive: it replaces the live pages and design that visitors see.
     ...toolHints("Publish website", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }),
     description:
-      "Publish the site: promote every pending draft page and the draft design to live, for real visitors. Call this ONLY when the user has explicitly asked to publish — design work belongs on the draft, which the operator previews and approves first. Refused if publishing would put more CUSTOM pages live than the plan allows (free 1, hobby 5, pro 25): the whole publish is refused rather than a subset going live, and the message names the limit. Unpublish or delete a custom page and call again.",
+      "Publish the site: promote every pending draft page and the draft design to live, for real visitors. Publishing makes the draft visible to every visitor. Until then the operator can preview and approve it. Refused if publishing would put more CUSTOM pages live than the plan allows (free 1, hobby 5, pro 25): the whole publish is refused rather than a subset going live, and the message names the limit. Unpublish or delete a custom page and call again.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4844,7 +4858,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     name: "site.discard_draft",
     ...toolHints("Discard website draft", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }),
     description:
-      "Throw away every unpublished draft edit across the whole site and revert to the live version. Destructive and not undoable — it discards the operator's pending work as well as yours. Confirm with the user first.",
+      "Throw away every unpublished draft edit across the whole site and revert to the live version. This cannot be undone, and it discards every pending edit, including edits other people made.",
     inputSchema: {
       type: "object",
       properties: {
@@ -4856,7 +4870,7 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
     name: "site.asset_list",
     ...toolHints("List images", { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
     description:
-      "List images in the publication's asset library, newest first, with the absolute URLs to use as an image block's src or a template's imageSrc slot. Each entry carries fileName, contentType, byteSize and width/height, so pick by what the image IS rather than by position. Use a real asset instead of inventing an image URL.",
+      "List images in the publication's asset library, newest first, with the absolute URLs to use as an image block's src or a template's imageSrc slot. Each entry carries fileName, contentType, byteSize and width/height, so pick by what the image IS rather than by position. These URLs are hosted by Mailtea and stay valid.",
     inputSchema: {
       type: "object",
       properties: {
@@ -5347,6 +5361,23 @@ function readRequiredJsonObjectArray(
   });
 }
 
+/**
+ * A section's content nodes, each an object with a string `type`. The API
+ * accepted [{"nope": true}] and saved a section that renders nothing
+ * (connector audit polish 4), so a node with no type is refused here.
+ */
+function readSectionContent(args: Record<string, unknown>, key: string): Array<Record<string, unknown>> {
+  const nodes = readRequiredJsonObjectArray(args, key);
+  nodes.forEach((node, index) => {
+    if (typeof node.type !== "string" || node.type.trim() === "") {
+      throw new Error(
+        `Argument ${key}[${index}] has no "type". Each item is an editor node, such as {"type":"paragraph","content":[{"type":"text","text":"Hi"}]}.`
+      );
+    }
+  });
+  return nodes;
+}
+
 function readOptionalJsonObjectArray(
   args: Record<string, unknown>,
   key: string
@@ -5676,20 +5707,217 @@ async function loadLatestAnalyticsSummary(
   return summary;
 }
 
+/**
+ * A successful tool result: a one-line summary, then the data.
+ *
+ * The data is in `structuredContent` AND, serialized, in a second text block.
+ * MCP 2025-06-18 says a tool returning structured content "SHOULD also return
+ * the serialized JSON in a TextContent block", and a client that shows the
+ * model only `content` would otherwise see the summary and none of the rows
+ * (connector audit 2026-10-06, S5). Compact JSON keeps the copy small, and
+ * data over JSON_COPY_LIMIT_BYTES gets no copy at all.
+ */
 function makeToolResult(text: string, structuredContent?: unknown) {
   return {
-    content: [
-      {
-        type: "text",
-        text
+    content: [{ type: "text", text }, ...jsonCopy(structuredContent)],
+    ...(structuredContent ? { structuredContent } : {})
+  };
+}
+
+/**
+ * Data larger than this is returned in structuredContent only. The JSON copy
+ * doubles a response, and past this size the copy costs more than the clients
+ * that read only content gain from it.
+ */
+const JSON_COPY_LIMIT_BYTES = 64 * 1024;
+
+/** The data's JSON as a text block, or nothing when there is no data or it is over JSON_COPY_LIMIT_BYTES. */
+function jsonCopy(structuredContent: unknown): Array<{ type: "text"; text: string }> {
+  if (!structuredContent) return [];
+  const text = JSON.stringify(structuredContent);
+  return new TextEncoder().encode(text).length > JSON_COPY_LIMIT_BYTES ? [] : [{ type: "text", text }];
+}
+
+/**
+ * Longest html or text body a read returns inline. An inbound email, a
+ * rendered preview or a template's HTML can run to hundreds of KB, and the
+ * review asks for responses "reasonably sized for the task" (connector audit
+ * 2026-10-06, polish 1). A cut body ends with TRUNCATION_MARKER, says where to
+ * get the rest, and the result's `truncated` maps each cut field to its full
+ * length.
+ */
+const INLINE_BODY_LIMIT = 20_000;
+const TRUNCATION_MARKER = "[Mailtea MCP cut this field";
+
+function cutBody(text: string, start: number, hint: string): string {
+  const end = start + INLINE_BODY_LIMIT;
+  if (start === 0 && text.length <= INLINE_BODY_LIMIT) return text;
+  const window = text.slice(start, end);
+  return end < text.length
+    ? `${window}\n\n${TRUNCATION_MARKER}: characters ${start} to ${end} of ${text.length} shown. ${hint}]`
+    : window;
+}
+
+/** `record` with each long string field in `fields` cut, plus `truncated` when any was. */
+function capLongFields<T extends Record<string, unknown>>(
+  record: T,
+  fields: readonly string[],
+  hint: string
+): T & { truncated?: Record<string, number> } {
+  const value: Record<string, unknown> = { ...record };
+  const truncated: Record<string, number> = {};
+  for (const field of fields) {
+    const text = value[field];
+    if (typeof text === "string" && text.length > INLINE_BODY_LIMIT) {
+      truncated[field] = text.length;
+      value[field] = cutBody(text, 0, hint);
+    }
+  }
+  if (Object.keys(truncated).length > 0) value.truncated = truncated;
+  return value as T & { truncated?: Record<string, number> };
+}
+
+/** The summary's note for the fields capLongFields cut, empty when none was. */
+function truncationNote(truncated: Record<string, number> | undefined, hint: string): string {
+  if (!truncated) return "";
+  const fields = Object.entries(truncated).map(([field, length]) => `${field} (${length} characters)`);
+  return ` Cut to ${INLINE_BODY_LIMIT} characters: ${fields.join(", ")}. ${hint}`;
+}
+
+/**
+ * A write must never save a body cut by a read: the marker means the text is
+ * not the whole document. Every string argument of a write is checked.
+ */
+function refuseTruncatedArguments(toolName: string, args: Record<string, unknown>): void {
+  const tool = (MCP_TOOLS as ReadonlyArray<{ name: string; annotations: McpToolAnnotations }>).find(
+    (candidate) => candidate.name === toolName
+  );
+  if (!tool || tool.annotations.readOnlyHint) return;
+  const visit = (value: unknown, path: string): void => {
+    if (typeof value === "string") {
+      if (value.includes(TRUNCATION_MARKER)) {
+        throw new Error(
+          `${path} contains "${TRUNCATION_MARKER}", the marker a read leaves on a shortened body, so it is not the whole document. Nothing was saved. Send the complete text instead.`
+        );
       }
-    ],
+    } else if (Array.isArray(value)) {
+      value.forEach((item, index) => visit(item, `${path}[${index}]`));
+    } else if (value && typeof value === "object") {
+      for (const [key, item] of Object.entries(value)) visit(item, path ? `${path}.${key}` : key);
+    }
+  };
+  for (const [key, value] of Object.entries(args)) visit(value, key);
+}
+
+/** The API's refusal for a publication the credential cannot reach (apps/api trpc.ts). */
+const PUBLICATION_ACCESS_REFUSAL = "Publication access is not available in the active organization";
+
+/**
+ * The API refuses a publication id it cannot match to the credential with a
+ * sentence about "the active organization", which tells an agent neither that
+ * the id is wrong nor what to pass. Said plainly, with the ids this connection
+ * can use when the hosted endpoint knows them (connector audit polish 8). It
+ * never says whether the id exists elsewhere.
+ */
+function explainPublicationRefusal(
+  message: string,
+  args: Record<string, unknown>,
+  options: McpRuntimeOptions
+): string {
+  if (!message.startsWith(PUBLICATION_ACCESS_REFUSAL)) return message;
+  const named = asOptionalString(args.publicationId) ?? asOptionalString(args.publication_id);
+  if (!named) return message;
+  const reachable = options.reachablePublications;
+  const choices =
+    reachable && reachable.length > 0
+      ? ` Publications this connection can use: ${reachable.map((publication) => `${publication.id} (${publication.name})`).join(", ")}.`
+      : " publication.list shows the publications this key can reach.";
+  return `No publication ${named} that this connection can reach.${choices}`;
+}
+
+/**
+ * A failed tool call, reported the way MCP asks: a result with `isError`, not a
+ * JSON-RPC error. API failures, invalid arguments and refused business rules
+ * are tool execution errors (spec 2025-06-18 "Error Handling"; 2025-11-25 moves
+ * input validation there too), because the model has to READ them to correct
+ * itself. A JSON-RPC error reads to a client, and to MCP Inspector, as a broken
+ * protocol exchange. Those stay for faults in the request itself: an unknown
+ * tool, a missing name, arguments that are not an object.
+ *
+ * The machine-readable half (`code`, `reason`, `details`, `status`...) that
+ * used to ride in `error.data` is the structured content, beside the message.
+ */
+function toolErrorResult(message: string, data?: unknown) {
+  const facts =
+    data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : null;
+  const structuredContent = facts ? { ...facts, error: message } : null;
+  return {
+    content: [{ type: "text", text: message }, ...jsonCopy(structuredContent)],
+    isError: true,
     ...(structuredContent ? { structuredContent } : {})
   };
 }
 
 function toErrorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : "Internal error";
+  return err instanceof Error && err.message
+    ? err.message
+    : "The Mailtea MCP server hit an unexpected error. Retry the call once, and if it fails again contact support@mailtea.app.";
+}
+
+/**
+ * What an agent is told when the API answered with an error status and no
+ * message of its own (a proxy's HTML 502, say). A bare "502 Bad Gateway" is
+ * the generic error the connector review rejects, so it says what to do.
+ */
+function httpFallbackMessage(status: number, statusText: string): string {
+  const line = `Mailtea API returned ${status}${statusText ? ` ${statusText}` : ""}`;
+  return status >= 500 ? `${line}. Retry in a minute.` : `${line}.`;
+}
+
+/** Drizzle's "Failed query: <sql>\nparams: <values>", or Postgres' own wording. */
+const RAW_SQL_MESSAGE = /^Failed query:|\nparams:|duplicate key value violates|violates (?:foreign key|not-null|check|unique) constraint/i;
+
+/**
+ * The zod issue array tRPC sends as the message of a failed input check,
+ * as one "field: message" line per issue, or null when the text is not one.
+ * Studio parses that JSON into form errors, so the API keeps sending it; an
+ * agent needs the lines (connector audit 2026-10-06, S2).
+ */
+export function formatZodIssueMessage(message: string): string | null {
+  const trimmed = message.trim();
+  if (!trimmed.startsWith("[")) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return null;
+  const lines: string[] = [];
+  for (const item of parsed) {
+    const issue = asObject(item);
+    if (typeof issue.message !== "string" || typeof issue.code !== "string") return null;
+    const path = Array.isArray(issue.path) ? issue.path.map(String).join(".") : "";
+    lines.push(path ? `${path}: ${issue.message}` : issue.message);
+  }
+  const shown = lines.slice(0, 10);
+  const more = lines.length > shown.length ? `\n(and ${lines.length - shown.length} more)` : "";
+  return `Validation failed:\n${shown.join("\n")}${more}`;
+}
+
+/**
+ * The message for a failed tRPC call. The API masks database errors itself
+ * (apps/api trpc-error-mask.ts); the SQL guard here also covers an API that
+ * predates that, which the npx package may be pointed at.
+ */
+function describeTrpcFailure(message: string | undefined, status: number, statusText: string): string {
+  if (!message) return httpFallbackMessage(status, statusText);
+  const zod = formatZodIssueMessage(message);
+  if (zod) return zod;
+  if (RAW_SQL_MESSAGE.test(message)) {
+    return "Mailtea could not complete this request. Retry once, and if it fails again contact support@mailtea.app.";
+  }
+  return message;
 }
 
 async function callTrpc<T>(
@@ -5740,13 +5968,23 @@ async function callTrpc<T>(
   const payload = (await httpResponse.json().catch(() => null)) as TrpcEnvelope<T> | null;
 
   if (!httpResponse.ok || payload?.error) {
-    throw new Error(
-      payload?.error?.message ?? `${httpResponse.status} ${httpResponse.statusText}`
-    );
+    const failure = new Error(
+      describeTrpcFailure(payload?.error?.message, httpResponse.status, httpResponse.statusText)
+    ) as Error & { data?: unknown };
+    // tRPC's code (CONFLICT, NOT_FOUND, BAD_REQUEST...) is what a client
+    // branches on, so it travels with the message as structured content.
+    const trpcCode = payload?.error?.data?.code;
+    failure.data = {
+      status: httpResponse.status,
+      ...(typeof trpcCode === "string" ? { code: trpcCode } : {})
+    };
+    throw failure;
   }
 
   if (!payload?.result || typeof payload.result !== "object" || !("data" in payload.result)) {
-    throw new Error(`Malformed tRPC response for ${path}`);
+    throw new Error(
+      `Mailtea API sent a response for ${path} that could not be read. Retry in a minute, and if it keeps failing contact support@mailtea.app.`
+    );
   }
 
   return payload.result.data as T;
@@ -5781,7 +6019,7 @@ async function callRestApi<T>(
 
   if (!httpResponse.ok) {
     const failure = new Error(
-      describeRestFailure(payload, `${httpResponse.status} ${httpResponse.statusText}`)
+      describeRestFailure(payload, httpFallbackMessage(httpResponse.status, httpResponse.statusText))
     ) as Error & { issues?: unknown; data?: unknown };
     // Automations answer a bad graph with coded `issues[]` alongside `error`. An
     // agent that can only see "400" cannot self-correct, so carry them along.
@@ -5983,42 +6221,6 @@ function describeAutomationIssues(result: {
   }
 
   return `${result.valid ? "valid" : "invalid"}, ${issues.length} issue(s):\n${formatAutomationIssues(issues)}`;
-}
-
-// REST endpoints that respond with text/csv (e.g. /v1/suppressions/export) can't
-// go through callRestApi, which parses JSON. Return the raw body instead.
-async function callRestApiText(
-  method: "GET" | "POST" | "PATCH" | "DELETE",
-  path: string,
-  options: McpRuntimeOptions
-): Promise<string> {
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const apiBaseUrl = resolveApiBaseUrl(options);
-  const token = resolveToken(options);
-
-  if (!token) {
-    throw new Error("Missing API token.");
-  }
-
-  const httpResponse = await fetchImpl(`${apiBaseUrl}${path}`, {
-    method,
-    headers: { authorization: `Bearer ${token}` }
-  });
-  const text = await httpResponse.text().catch(() => "");
-
-  if (!httpResponse.ok) {
-    // Error responses are JSON; surface the `error` field when present.
-    let message = text || `${httpResponse.status} ${httpResponse.statusText}`;
-    try {
-      const parsed = JSON.parse(text) as { error?: string };
-      if (parsed?.error) message = parsed.error;
-    } catch {
-      // Non-JSON body — keep the raw text.
-    }
-    throw new Error(message);
-  }
-
-  return text;
 }
 
 /** Fields forwarded verbatim from email.send args to POST /v1/emails. */
@@ -6370,10 +6572,14 @@ async function runTool(
     const publicationId = await readPublicationId(args, options);
     const requestedLimit = readOptionalNumber(args, "limit");
     const limit = Math.max(1, Math.min(50, Math.trunc(requestedLimit ?? 10)));
+    const offset = Math.max(0, Math.trunc(readOptionalNumber(args, "offset") ?? 0));
 
+    // issue.listRecentPage for every page: it orders by (updated_at, id), so
+    // pages neither overlap nor skip an issue on an updated_at tie, which
+    // issue.listRecent (updated_at alone) cannot promise.
     const rows = await callTrpc<IssueRecord[]>(
-      "issue.listRecent",
-      { publicationId, limit },
+      "issue.listRecentPage",
+      { publicationId, limit, offset },
       options,
       "query"
     );
@@ -6384,7 +6590,9 @@ async function runTool(
         : `Loaded ${rows.length} issues for ${publicationId}`,
       {
         publicationId,
-        issues: rows
+        issues: rows,
+        // A full page may have more behind it; pass this as offset.
+        nextOffset: rows.length === limit ? offset + limit : null
       }
     );
   }
@@ -6474,15 +6682,13 @@ async function runTool(
   if (toolName === "publication.domain_verify") {
     const publicationId = await readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
-    const verificationValue = asOptionalString(args.verificationValue);
 
+    // No verificationValue: the API looks the TXT record up in public DNS and
+    // trusts nothing else. Taking the value from the caller let any owner or
+    // admin key verify a host it does not control (connector audit S4).
     const result = await callTrpc<PublicationDomainUpsertResult>(
       "publication.domainVerify",
-      {
-        publicationId,
-        domainId,
-        ...(verificationValue ? { verificationValue } : {})
-      },
+      { publicationId, domainId },
       options
     );
 
@@ -6579,7 +6785,13 @@ async function runTool(
         ...(typeof isDefault === "boolean" ? { isDefault } : {})
       },
       options
-    );
+    ).catch((error: unknown) => {
+      // The API names the clash; the agent also needs the tools that resolve it.
+      if ((error as { data?: { code?: unknown } } | null)?.data?.code === "CONFLICT" && error instanceof Error) {
+        error.message = `${error.message} Use sender.list to find it, or sender.update to change it.`;
+      }
+      throw error;
+    });
 
     return makeToolResult(
       `Sender created: ${result.sender?.name} <${result.sender?.email}>`,
@@ -6671,13 +6883,44 @@ async function runTool(
   }
 
   if (toolName === "suppression.export") {
-    const csv = await callRestApiText("GET", "/v1/suppressions/export", options);
-    // Data rows only: drop the header line and any trailing blank line.
-    const rowCount = Math.max(0, csv.split("\n").filter((line) => line.length > 0).length - 1);
+    // One page, never the whole list: GET /v1/suppressions/export streams every
+    // row, so a team with 50,000 suppressions got a multi-megabyte tool result
+    // (connector audit B5). Pages are read from the keyset-paged list route,
+    // 100 rows a request, and its next_cursor is handed back as nextCursor.
+    const requestedLimit = readOptionalNumber(args, "limit");
+    const limit = Math.max(
+      1,
+      Math.min(SUPPRESSION_EXPORT_MAX_ROWS, Math.trunc(requestedLimit ?? SUPPRESSION_EXPORT_DEFAULT_ROWS))
+    );
+    let cursor = asOptionalString(args.cursor);
+    const rows: SuppressionListResponse["data"] = [];
+    let nextCursor: string | null = null;
+    while (rows.length < limit) {
+      const params = new URLSearchParams({ limit: String(Math.min(100, limit - rows.length)) });
+      if (cursor) params.set("starting_after", cursor);
+      const page = await callRestApi<SuppressionListResponse>(
+        "GET",
+        `/v1/suppressions?${params.toString()}`,
+        undefined,
+        options
+      );
+      rows.push(...page.data);
+      nextCursor = page.has_more && page.next_cursor ? page.next_cursor : null;
+      if (!nextCursor || page.data.length === 0) break;
+      cursor = nextCursor;
+    }
+
+    const csv =
+      ["email,reason,source,created_at", ...rows.map((row) => [row.email, row.reason, row.source, row.created_at].map(csvField).join(","))].join("\n") +
+      "\n";
+    const rowCount = rows.length;
+    const entries = `${rowCount} entr${rowCount === 1 ? "y" : "ies"}`;
 
     return makeToolResult(
-      `Suppression list exported: ${rowCount} entr${rowCount === 1 ? "y" : "ies"}`,
-      { csv, filename: "suppressions.csv", rowCount }
+      nextCursor
+        ? `Suppression list page exported: ${entries}. More remain: pass nextCursor as cursor for the next page.`
+        : `Suppression list exported: ${entries}${asOptionalString(args.cursor) ? " (last page)" : ""}`,
+      { csv, filename: "suppressions.csv", rowCount, nextCursor }
     );
   }
 
@@ -7180,17 +7423,19 @@ async function runTool(
     const publicationId = await readPublicationId(args, options);
     const templateId = readRequiredString(args, "templateId");
 
+    // The procedure names the pack presetId. Sending templateId (the tool's
+    // own argument name) failed every call with a zod "presetId: Required".
     const result = await callTrpc<SectionImportResult>(
       "section.importPack",
       {
         publicationId,
-        templateId
+        presetId: templateId
       },
       options
     );
 
     return makeToolResult(
-      `Imported pack ${result.templateId}: ${result.createdCount} created, ${result.updatedCount} updated`,
+      `Imported pack ${result.presetId}: ${result.createdCount} created, ${result.updatedCount} updated`,
       result
     );
   }
@@ -7198,7 +7443,7 @@ async function runTool(
   if (toolName === "section.create") {
     const publicationId = await readPublicationId(args, options);
     const name = readRequiredString(args, "name");
-    const contentJson = readRequiredJsonObjectArray(args, "contentJson");
+    const contentJson = readSectionContent(args, "contentJson");
 
     const section = await callTrpc<ReusableSectionRecord>(
       "section.create",
@@ -7216,7 +7461,7 @@ async function runTool(
   if (toolName === "section.update") {
     const sectionId = readRequiredString(args, "sectionId");
     const name = readRequiredString(args, "name");
-    const contentJson = readRequiredJsonObjectArray(args, "contentJson");
+    const contentJson = readSectionContent(args, "contentJson");
 
     const section = await callTrpc<ReusableSectionRecord>(
       "section.update",
@@ -7251,7 +7496,10 @@ async function runTool(
       "query"
     );
 
-    return makeToolResult(`Preview generated for ${preview.issueId}`, preview);
+    const hint = "issue.get_editor returns the content as an outline, and email.lint checks the layout.";
+    const capped = capLongFields(preview, ["html"], hint);
+    const note = truncationNote(capped.truncated, hint);
+    return makeToolResult(`Preview generated for ${preview.issueId}${note ? `.${note}` : ""}`, capped);
   }
 
   if (toolName === "issue.preview_draft") {
@@ -7273,9 +7521,12 @@ async function runTool(
       options
     );
 
+    const hint = "The rest is the HTML you sent; email.lint checks the layout.";
+    const capped = capLongFields(preview, ["html", "text"], hint);
+    const note = truncationNote(capped.truncated, hint);
     return makeToolResult(
-      `Draft preview generated for ${preview.publicationId}: ${preview.title}`,
-      preview
+      `Draft preview generated for ${preview.publicationId}: ${preview.title}${note ? `.${note}` : ""}`,
+      capped
     );
   }
 
@@ -7623,34 +7874,6 @@ async function runTool(
     }
   }
 
-  if (toolName === "ai.generate_draft") {
-    const publicationId = await readPublicationId(args, options);
-    const prompt = readRequiredString(args, "prompt");
-    const tone = asOptionalString(args.tone);
-
-    if (tone && tone !== "neutral" && tone !== "friendly" && tone !== "formal") {
-      throw new Error("tone must be one of: neutral, friendly, formal");
-    }
-
-    const draft = await callTrpc<AiDraft>(
-      "ai.generateDraft",
-      {
-        publicationId,
-        prompt,
-        ...(tone ? { tone } : {})
-      },
-      options
-    );
-
-    // Honest about what this is (user-testing 0924a, mcp/F13): the server
-    // returns a fixed scaffold with no model call, and it used to come back as
-    // "AI draft generated", which an agent reasonably took as finished copy.
-    return makeToolResult(
-      "Scaffold only: no AI model ran and nothing was saved. Write the email yourself and save it with issue.create_draft.",
-      { ...draft, scaffold: true, saved: false, next: "issue.create_draft" }
-    );
-  }
-
   if (toolName === "template.create") {
     const publicationId = await readPublicationId(args, options);
     const name = readRequiredString(args, "name");
@@ -7739,15 +7962,35 @@ async function runTool(
     const publicationId = await readPublicationId(args, options);
     const templateId = readRequiredString(args, "templateId");
 
-    const template = await callRestApi<Record<string, unknown>>(
+    const htmlOffset = Math.max(0, Math.trunc(readOptionalNumber(args, "html_offset") ?? 0));
+
+    const stored = await callRestApi<Record<string, unknown>>(
       "GET",
       `/v1/templates/${encodeURIComponent(templateId)}?publication_id=${encodeURIComponent(publicationId)}`,
       undefined,
       options
     );
 
+    // html is cut to one window. For an editor or spec template it is derived
+    // from editor_doc or spec, which come back whole; for an html template it
+    // is the source, read in windows with html_offset.
+    const template: Record<string, unknown> = { ...stored };
+    let note = "";
+    if (typeof stored.html === "string" && (htmlOffset > 0 || stored.html.length > INLINE_BODY_LIMIT)) {
+      const total = stored.html.length;
+      const end = Math.min(total, htmlOffset + INLINE_BODY_LIMIT);
+      const hint =
+        end < total
+          ? `Call template.get with html_offset ${end} for the next part${stored.format === "editor" ? "; editor_doc is the whole design" : stored.format === "spec" ? "; spec is the whole design" : ""}.`
+          : "";
+      template.html = cutBody(stored.html, htmlOffset, hint);
+      template.truncated = { html: total };
+      template.html_window = { start: Math.min(htmlOffset, total), end, total, next_offset: end < total ? end : null };
+      note = ` html is characters ${Math.min(htmlOffset, total)} to ${end} of ${total}.${hint ? ` ${hint}` : ""}`;
+    }
+
     return makeToolResult(
-      `Template: ${template.name} (${template.format}, ${template.status})`,
+      `Template: ${template.name} (${template.format}, ${template.status})${note}`,
       { template }
     );
   }
@@ -8210,16 +8453,18 @@ async function runTool(
 
   if (toolName === "email.inbound_get") {
     const id = readRequiredString(args, "id");
-    const result = await callRestApi<Record<string, unknown>>(
+    const received = await callRestApi<Record<string, unknown>>(
       "GET",
       `/v1/emails/inbound/${encodeURIComponent(id)}`,
       undefined,
       options
     );
+    const hint = "The whole message is at raw.download_url.";
+    const result = capLongFields(received, ["html", "text"], hint);
     return makeToolResult(
       `Inbound email ${id}: ${String(result.subject ?? "(no subject)")} from ${String(
         result.from ?? "unknown"
-      )}.`,
+      )}.${truncationNote(result.truncated, hint)}`,
       result
     );
   }
@@ -9687,7 +9932,7 @@ async function runTool(
     return makeToolResult(
       `Loaded site for ${publicationId} (draftVersion ${site.draftVersion}${
         site.hasUnpublishedChanges ? ", unpublished changes pending" : ""
-      }${site.designBrief ? ", design brief set — follow it" : ", no design brief"})`,
+      }${site.designBrief ? ", design brief saved" : ", no design brief"})`,
       {
         publicationId,
         settings: site.settings,
@@ -9932,7 +10177,7 @@ async function runTool(
 
     return makeToolResult(
       site.designBrief
-        ? `Design brief for ${publicationId} (${site.designBrief.length} chars) — treat it as binding on every design change`
+        ? `Design brief for ${publicationId} (${site.designBrief.length} chars)`
         : `No design brief set for ${publicationId}`,
       { publicationId, designBrief: site.designBrief }
     );
@@ -9944,7 +10189,9 @@ async function runTool(
     const designBrief = readNullableString(args, "designBrief");
     if (designBrief === undefined) {
       throw new Error(
-        "Missing required argument: designBrief (a markdown string, or null to clear)"
+        args.designBrief === undefined
+          ? "Missing required argument: designBrief (a markdown string, or null to clear)"
+          : `Argument designBrief must be a markdown string, or null to clear the brief; got ${Array.isArray(args.designBrief) ? "an array" : typeof args.designBrief}.`
       );
     }
 
@@ -10070,11 +10317,15 @@ async function runTool(
       "mutation"
     );
 
+    // An id that matches nothing is a failure, as every other delete reports
+    // it, not a success saying nothing happened (connector audit polish 6).
+    if (!result.deleted) {
+      throw new Error(`No asset ${assetId} in ${publicationId}. site.asset_list shows the asset ids.`);
+    }
+
     return makeToolResult(
-      result.deleted
-        ? `Removed ${assetId} from the asset library. Anything already referencing its URL still renders.`
-        : `No asset ${assetId} in ${publicationId}`,
-      { publicationId, assetId, deleted: result.deleted }
+      `Removed ${assetId} from the asset library. Anything already referencing its URL still renders.`,
+      { publicationId, assetId, deleted: true }
     );
   }
 
@@ -10361,18 +10612,23 @@ export async function handleMcpRequest(
           return error(id, -32602, "Param arguments must be an object");
         }
 
+        // An unknown name is a protocol error: there is no tool to report on.
+        if (!TOOL_ARGUMENT_NAMES.has(toolName)) {
+          return error(id, -32602, `Unknown tool: ${toolName}`);
+        }
+
         const args = (argumentsValue ?? {}) as Record<string, unknown>;
         const warning = unknownArgumentsWarning(toolName, args);
         let result: Awaited<ReturnType<typeof runTool>>;
         try {
+          refuseTruncatedArguments(toolName, args);
           result = await runTool(toolName, args, options);
         } catch (err) {
           // A failure is often CAUSED by the ignored key (publication_id sent
           // to a camelCase tool, say), so the error names it too.
-          if (warning && err instanceof Error) {
-            err.message = `${err.message}\n${warning}`;
-          }
-          throw err;
+          const reason = explainPublicationRefusal(toErrorMessage(err), args, options);
+          const message = warning ? `${reason}\n${warning}` : reason;
+          return response(id, toolErrorResult(message, (err as { data?: unknown } | null)?.data));
         }
         if (warning && result && Array.isArray((result as { content?: unknown }).content)) {
           // A separate content item, never appended to the first: some tools

@@ -4,6 +4,69 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
 
+- Changed: a failed tool call is a tool result with `isError: true`, not a
+  JSON-RPC error. The message is the first text block, and the API's code and
+  HTTP status (what used to be `error.data`) are in `structuredContent` beside
+  it. An unknown tool name and `arguments` that is not an object stay JSON-RPC
+  errors, code -32602. MCP puts API failures, invalid arguments and refused
+  business rules in the result so the model can read them and correct itself.
+- Changed: every result carries its data as compact JSON in a second text
+  block as well as in `structuredContent`, as MCP asks of a tool that returns
+  structured content. Data over 64 KB comes in `structuredContent` only, so a
+  large result is not sent twice. An unknown-argument warning stays a
+  separate last block.
+- Changed: `destructiveHint` is `true` on every tool that changes existing
+  data, not only on deletes, consent changes and sends: the draft edits
+  (`issue.update_draft`, `issue.apply_ops`, `site.apply_ops`), every update,
+  upsert, restore and publish, `issue.unschedule`, `email.reschedule`,
+  `domain.verify`, `publication.domain_verify`, `sender.set_default`, and
+  `sender.create` (its `isDefault` demotes the current default sender). Only
+  purely additive creates stay non-destructive. Clients such as Claude now ask
+  before these calls.
+- Fixed: `section.import_pack` works. It sent `templateId` where the API reads
+  `presetId`, so every call failed with "presetId: Required". The argument is
+  still `templateId`.
+- Fixed: a tRPC input error reads as one `field: message` line per issue under
+  "Validation failed:", not as a zod JSON array. Raw SQL from an older API is
+  replaced with a retry message, and an error status with no message of its own
+  says what to do ("Mailtea API returned 502 Bad Gateway. Retry in a minute.").
+- Fixed: a duplicate `sender.create` answers "A sender with the email ...
+  already exists in this publication. Use sender.list to find it, or
+  sender.update to change it." It used to answer with the raw SQL insert and
+  its parameters (the API fix ships with the next deploy).
+- Changed: `suppression.export` returns one page: `limit` rows (default 500, at
+  most 2,000) as CSV, with `nextCursor` to pass back as `cursor`, `null` on the
+  last page. `rowCount` is the page's row count. It used to return the team's
+  entire list in one response.
+- Removed: `publication.domain_verify` no longer takes `verificationValue`. The
+  API looks the verification TXT record up in public DNS itself and never
+  trusts a value from the caller (the API change ships with the next deploy).
+- Removed: `ai.generate_draft`. It returned a fixed placeholder; no model ran.
+  Write the email and save it with `issue.create_draft`. The catalog has 165
+  tools.
+- Changed: descriptions state what a tool does and never tell the model how to
+  behave. `site.get` and the design brief tools describe the brief as text the
+  publication's team saved, instead of an instruction that "MUST be followed".
+  The automation tools' snake_case sentence gives the right reason.
+- Changed: `email.inbound_get`, `issue.preview`, `issue.preview_draft` and
+  `template.get` cut an html or text body over 20,000 characters, ending with
+  a marker that says where the rest is; `truncated` gives each cut field's full
+  length. `template.get` takes `html_offset` to read a long html source in
+  parts. A write that carries the marker is refused.
+- Changed: `tools/list` is about 206 KB, down from about 240 KB. The shared
+  `publicationId` description is one short sentence, and the automation step
+  config help and the site page document format are no longer repeated on
+  several properties of the same tool.
+- Added: `issue.list_recent` takes `offset` and returns `nextOffset`. Every
+  page, the first included, is ordered by last update and then id, so pages
+  never overlap or skip an issue.
+- Fixed: `site.asset_delete` reports an unknown asset id as a failure;
+  `site.design_brief_set` says a non-string brief is the wrong type; `email.list`
+  advertises the `delivery_delayed` and `suppressed` statuses; `section.create`
+  and `section.update` refuse a content node with no `type`; a publication id
+  the credential cannot reach reads "No publication <id> that this connection
+  can reach", with the ids the hosted connection can use.
+
 - Changed: the `region` descriptions on `domain.create` and `domain.list` no
   longer speak of a deployment. A new domain defaults to Mailtea's default
   region, US West (`us-west-1`), unless you pick another enabled region. The

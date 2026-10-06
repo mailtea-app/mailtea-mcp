@@ -3,6 +3,22 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { MCP_TOOLS, handleMcpRequest } from "./index.js";
 
+type JsonRpcResponse = Awaited<ReturnType<typeof handleMcpRequest>>;
+
+/**
+ * A tool failure: the isError result MCP reports tool errors as, or the
+ * JSON-RPC error a protocol fault (unknown tool, malformed request) still is.
+ */
+function toolFailure(response: JsonRpcResponse): { message: string; data?: Record<string, unknown> } | undefined {
+  if (response.error) return { message: response.error.message, data: response.error.data as Record<string, unknown> | undefined };
+  const result = response.result as
+    | { isError?: boolean; content?: Array<{ text?: string }>; structuredContent?: Record<string, unknown> }
+    | undefined;
+  if (!result?.isError) return undefined;
+  const { error: _message, ...data } = result.structuredContent ?? {};
+  return { message: result.content?.[0]?.text ?? "", data: Object.keys(data).length > 0 ? data : undefined };
+}
+
 /**
  * The contract an agent actually meets: what a tool's schema and description
  * promise against what the tool then does. Each case here is a mismatch a real
@@ -110,7 +126,7 @@ test("event.send lists property-schema issues without a literal 'undefined'", as
     fetchImpl
   );
 
-  const message = response.error?.message ?? "";
+  const message = toolFailure(response)?.message ?? "";
   assert.doesNotMatch(message, /undefined/);
   assert.match(message, /- missing_required_property \[properties\.plan\]: Required property "plan" is missing\./);
   assert.match(message, /- property_type_mismatch \[properties\.seats\]/);
@@ -133,7 +149,7 @@ test("automation issues that DO carry a severity still print it", async () => {
     fetchImpl
   );
 
-  assert.match(response.error?.message ?? "", /- error missing_template \[send\]: Pick a template\./);
+  assert.match(toolFailure(response)?.message ?? "", /- error missing_template \[send\]: Pick a template\./);
 });
 
 // --- mcp/F20: site.asset_upload and SVG -------------------------------------
@@ -173,7 +189,7 @@ test("issue.create_draft passes the renderer's reason through, not just 'Spec re
     fetchImpl
   );
 
-  const message = response.error?.message ?? "";
+  const message = toolFailure(response)?.message ?? "";
   assert.match(message, /^Spec rendering failed/);
   assert.match(message, /Teleporter" is not a known component/);
 });
@@ -195,7 +211,7 @@ test("a REST validation failure names the fields zod rejected", async () => {
     fetchImpl
   );
 
-  const message = response.error?.message ?? "";
+  const message = toolFailure(response)?.message ?? "";
   assert.match(message, /^Validation failed/);
   assert.match(message, /spec\.root: Required/);
   assert.match(message, /name: String must contain/);
@@ -220,13 +236,13 @@ test("automation.enable shows the refusal's code, reason and steps, as its descr
     fetchImpl
   );
 
-  const message = response.error?.message ?? "";
+  const message = toolFailure(response)?.message ?? "";
   assert.match(message, /no verified sending domain yet/);
   assert.match(message, /code: no_verified_sender/);
   assert.match(message, /reason: CUSTOM_DOMAIN_REQUIRED/);
   assert.match(message, /steps: welcome, follow_up/);
   assert.deepEqual(
-    response.error?.data,
+    toolFailure(response)?.data,
     {
       status: 422,
       code: "no_verified_sender",
@@ -266,40 +282,21 @@ test("domain.create says what an omitted purpose means", () => {
   assert.match(purpose, /cannot send/);
 });
 
-// --- mcp/F13: ai.generate_draft and the newsletter.* prompts ----------------
+// --- mcp/F13: no tool pretends to write copy, and the newsletter.* prompts ----
 
-test("ai.generate_draft says it returns a scaffold and that no model runs", () => {
-  const { description } = findTool("ai.generate_draft");
-  assert.match(description, /scaffold/i);
-  assert.match(description, /No AI model runs/);
-  assert.match(description, /issue\.create_draft/);
-});
-
-test("ai.generate_draft's result is labelled a scaffold, not a generated draft", async () => {
-  const { fetchImpl } = recording(() =>
-    trpcOk({
-      title: "Draft: A short newsletter announcing",
-      content: [{ type: "paragraph", text: "Placeholder" }]
-    })
-  );
-
-  const response = await callTool(
-    "ai.generate_draft",
-    { publicationId: "pub_1", prompt: "A short newsletter announcing agent tools", tone: "friendly" },
-    fetchImpl
-  );
-
-  assert.equal(response.error, undefined);
-  const result = response.result as {
-    content: Array<{ text: string }>;
-    structuredContent: Record<string, unknown>;
-  };
-  assert.doesNotMatch(result.content[0]!.text, /AI draft generated/);
-  assert.match(result.content[0]!.text, /scaffold/i);
-  assert.match(result.content[0]!.text, /nothing was saved/i);
-  assert.equal(result.structuredContent.scaffold, true);
-  assert.equal(result.structuredContent.saved, false);
-  assert.equal(result.structuredContent.title, "Draft: A short newsletter announcing");
+test("ai.generate_draft is gone: no tool returns placeholder copy as if it were a draft", async () => {
+  // It returned a fixed scaffold with no model call, and agents took it for
+  // finished copy (user-testing 0924a, mcp/F13). A connector reviewer tests
+  // every tool, so it left the catalog (connector audit 2026-10-06, S3).
+  assert.equal(MCP_TOOLS.some((tool) => tool.name.startsWith("ai.")), false);
+  const response = await handleMcpRequest({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/call",
+    params: { name: "ai.generate_draft", arguments: { prompt: "x" } }
+  });
+  assert.equal(response.error?.code, -32602);
+  assert.equal(response.error?.message, "Unknown tool: ai.generate_draft");
 });
 
 async function rpc(method: string, params: Record<string, unknown>) {
@@ -360,7 +357,7 @@ test("a prompt called without its brief still answers, and asks for one", async 
   // Older clients call prompts/get with no arguments at all; they get a usable
   // message rather than an error.
   const response = await rpc("prompts/get", { name: "newsletter.draft_from_brief" });
-  assert.equal(response.error, undefined);
+  assert.equal(toolFailure(response), undefined);
   const text = (response.result as { messages: Array<{ content: { text: string } }> }).messages[0]!
     .content.text;
   assert.match(text, /brief/i);
@@ -466,7 +463,7 @@ test("an unknown argument is named in a warning, and the call still runs", async
 
   const response = await callTool("email.list", { tags: ["source=mcp-qa"], limit: 5 }, fetchImpl);
 
-  assert.equal(response.error, undefined);
+  assert.equal(toolFailure(response), undefined);
   assert.equal(calls.length, 1, "the call is not refused");
   const content = (response.result as { content: Array<{ type: string; text: string }> }).content;
   const warning = content.find((item) => /ignored/i.test(item.text));
@@ -500,7 +497,7 @@ test("an error also says which arguments were ignored", async () => {
     fetchImpl
   );
 
-  const message = response.error?.message ?? "";
+  const message = toolFailure(response)?.message ?? "";
   assert.match(message, /^Automation not found/);
   assert.match(message, /automationId \(did you mean automation_id\?\)/);
 });
@@ -509,7 +506,9 @@ test("a call with only declared arguments carries no warning", async () => {
   const { fetchImpl } = recording(() => json(200, { data: [], total: 0, has_more: false }));
   const response = await callTool("email.list", { tag_name: "source", tag_value: "mcp-qa" }, fetchImpl);
   const content = (response.result as { content: Array<{ text: string }> }).content;
-  assert.equal(content.length, 1);
+  // The summary and the data's JSON copy, and no warning after them.
+  assert.equal(content.length, 2);
+  assert.ok(content.every((item) => !item.text.startsWith("Warning:")));
 });
 
 test("email.send advertises every field it forwards", () => {
@@ -813,7 +812,7 @@ test("a team-wide key that reaches ONE publication uses it as the default", asyn
     envPublicationFallback: false
   });
 
-  assert.equal(response.error, undefined, JSON.stringify(response.error));
+  assert.equal(toolFailure(response), undefined, JSON.stringify(toolFailure(response)));
   const created = calls.find((call) => new URL(call.url).pathname === "/trpc/issue.createDraft");
   assert.ok(created, "the tool ran");
   assert.equal(JSON.parse(String(created.init?.body)).publicationId, "pub_only");
@@ -828,7 +827,7 @@ test("a team-wide key that reaches several publications is told which ids it can
 
   const response = await callTool("sender.list", {}, fetchImpl, { envPublicationFallback: false });
 
-  const message = response.error?.message ?? "";
+  const message = toolFailure(response)?.message ?? "";
   // Kept as the first words: every client and doc so far has matched on it.
   assert.match(message, /^Missing required string argument: publicationId\./);
   assert.match(message, /reaches 2 publications/);
@@ -849,8 +848,8 @@ test("the snake_case tools name the key their callers pass", async () => {
   const response = await callTool("automation.get", { automation_id: "aut_1" }, fetchImpl, {
     envPublicationFallback: false
   });
-  assert.match(response.error?.message ?? "", /^Missing required string argument: publication_id\./);
-  assert.match(response.error?.message ?? "", /pass publication_id/);
+  assert.match(toolFailure(response)?.message ?? "", /^Missing required string argument: publication_id\./);
+  assert.match(toolFailure(response)?.message ?? "", /pass publication_id/);
 });
 
 test("a publication-scoped key is its own default even when its person has more", async () => {
@@ -865,7 +864,7 @@ test("a publication-scoped key is its own default even when its person has more"
   );
 
   const response = await callTool("sender.list", {}, fetchImpl, { envPublicationFallback: false });
-  assert.equal(response.error, undefined, JSON.stringify(response.error));
+  assert.equal(toolFailure(response), undefined, JSON.stringify(toolFailure(response)));
   const listed = calls.find((call) => new URL(call.url).pathname === "/trpc/publication.senderList");
   assert.ok(listed, `expected the sender list call, got ${calls.map((call) => call.url).join(", ")}`);
   assert.equal(JSON.parse(new URL(listed.url).searchParams.get("input") ?? "{}").publicationId, "pub_key");
@@ -874,8 +873,8 @@ test("a publication-scoped key is its own default even when its person has more"
 test("a key that reaches no publication is told to create one", async () => {
   const { fetchImpl } = withAuthMe(authMe({ publicationMemberships: [] }));
   const response = await callTool("sender.list", {}, fetchImpl, { envPublicationFallback: false });
-  assert.match(response.error?.message ?? "", /^Missing required string argument: publicationId\./);
-  assert.match(response.error?.message ?? "", /publication\.create/);
+  assert.match(toolFailure(response)?.message ?? "", /^Missing required string argument: publicationId\./);
+  assert.match(toolFailure(response)?.message ?? "", /publication\.create/);
 });
 
 test("memberships in another team do not count toward the default", async () => {
@@ -888,15 +887,15 @@ test("memberships in another team do not count toward the default", async () => 
   const response = await callTool("issue.create_draft", { title: "Hi" }, fetchImpl, {
     envPublicationFallback: false
   });
-  assert.equal(response.error, undefined, JSON.stringify(response.error));
+  assert.equal(toolFailure(response), undefined, JSON.stringify(toolFailure(response)));
 });
 
 test("when the lookup itself fails, the error says why and how to proceed", async () => {
   const { fetchImpl } = recording(() => json(401, { error: { message: "Unauthorized" } }));
   const response = await callTool("sender.list", {}, fetchImpl, { envPublicationFallback: false });
-  assert.match(response.error?.message ?? "", /^Missing required string argument: publicationId\./);
-  assert.match(response.error?.message ?? "", /\(Unauthorized\)/, "the lookup's own failure is named");
-  assert.match(response.error?.message ?? "", /publication\.list/);
+  assert.match(toolFailure(response)?.message ?? "", /^Missing required string argument: publicationId\./);
+  assert.match(toolFailure(response)?.message ?? "", /\(Unauthorized\)/, "the lookup's own failure is named");
+  assert.match(toolFailure(response)?.message ?? "", /publication\.list/);
 });
 
 // Review of batch D1, H2. auth.me's organizationId is the request's ACTIVE
@@ -911,8 +910,8 @@ test("no default when the active team is not the key's own team", async () => {
     })
   );
   const response = await callTool("sender.list", {}, fetchImpl, { envPublicationFallback: false });
-  assert.match(response.error?.message ?? "", /^Missing required string argument: publicationId\./);
-  assert.doesNotMatch(response.error?.message ?? "", /pub_b1/, "another team's publication is never offered");
+  assert.match(toolFailure(response)?.message ?? "", /^Missing required string argument: publicationId\./);
+  assert.doesNotMatch(toolFailure(response)?.message ?? "", /pub_b1/, "another team's publication is never offered");
   assert.deepEqual(calls.map((call) => new URL(call.url).pathname), ["/trpc/auth.me"]);
 });
 
@@ -921,7 +920,7 @@ test("no default from a server that does not say which team the key belongs to",
     authMe({ credentialOrganizationId: undefined, publicationMemberships: [membership("pub_only", "Only")] })
   );
   const response = await callTool("sender.list", {}, fetchImpl, { envPublicationFallback: false });
-  assert.match(response.error?.message ?? "", /^Missing required string argument: publicationId\./);
+  assert.match(toolFailure(response)?.message ?? "", /^Missing required string argument: publicationId\./);
 });
 
 test("a service key takes no membership default", async () => {
@@ -929,8 +928,8 @@ test("a service key takes no membership default", async () => {
     authMe({ tokenType: "service", publicationMemberships: [membership("pub_only", "Only")] })
   );
   const response = await callTool("sender.list", {}, fetchImpl, { envPublicationFallback: false });
-  assert.match(response.error?.message ?? "", /^Missing required string argument: publicationId\./);
-  assert.doesNotMatch(response.error?.message ?? "", /pub_only/);
+  assert.match(toolFailure(response)?.message ?? "", /^Missing required string argument: publicationId\./);
+  assert.doesNotMatch(toolFailure(response)?.message ?? "", /pub_only/);
 });
 
 test("a discovered default is reused for the same token instead of asking auth.me again", async () => {
@@ -954,12 +953,12 @@ test("a failed discovery is not cached", async () => {
   );
   const token = "mt_pat_cache_miss";
   const first = await callTool("sender.list", {}, fetchImpl, { envPublicationFallback: false, token });
-  assert.match(first.error?.message ?? "", /publication\.create/);
+  assert.match(toolFailure(first)?.message ?? "", /publication\.create/);
 
   // The operator follows the advice and creates a publication.
   memberships = [membership("pub_new", "New")];
   const second = await callTool("sender.list", {}, fetchImpl, { envPublicationFallback: false, token });
-  assert.equal(second.error, undefined, JSON.stringify(second.error));
+  assert.equal(toolFailure(second), undefined, JSON.stringify(toolFailure(second)));
   assert.equal(calls.filter((call) => new URL(call.url).pathname === "/trpc/auth.me").length, 2);
 });
 
@@ -972,13 +971,13 @@ test("a host that already resolved the credential is never asked back through th
       { id: "pub_b", name: "Beta" }
     ]
   });
-  assert.match(listed.error?.message ?? "", /pub_a \(Alpha\), pub_b \(Beta\)/);
+  assert.match(toolFailure(listed)?.message ?? "", /pub_a \(Alpha\), pub_b \(Beta\)/);
 
   const nothing = await callTool("sender.list", {}, fetchImpl, {
     envPublicationFallback: false,
     reachablePublications: null
   });
-  assert.match(nothing.error?.message ?? "", /^Missing required string argument: publicationId\. Pass the id/);
+  assert.match(toolFailure(nothing)?.message ?? "", /^Missing required string argument: publicationId\. Pass the id/);
   assert.deepEqual(calls, [], "no auth.me, and no tool call, without a publication");
 });
 
@@ -1032,7 +1031,7 @@ test("issue.create_draft forwards name, from and replyTo with strictHeaders", as
     },
     fetchImpl
   );
-  assert.equal(response.error, undefined, JSON.stringify(response.error));
+  assert.equal(toolFailure(response), undefined, JSON.stringify(toolFailure(response)));
   const created = calls.find((call) => new URL(call.url).pathname === "/trpc/issue.createDraft");
   assert.ok(created);
   const body = JSON.parse(String(created.init?.body));
@@ -1046,7 +1045,7 @@ test("issue.create_draft forwards name, from and replyTo with strictHeaders", as
 test("issue.update_draft sends only what the agent passed", async () => {
   const { calls, fetchImpl } = recording(() => trpcOk({ id: "iss_1", status: "draft" }));
   const response = await callTool("issue.update_draft", { issueId: "iss_1", name: "Renamed", from: "" }, fetchImpl);
-  assert.equal(response.error, undefined, JSON.stringify(response.error));
+  assert.equal(toolFailure(response), undefined, JSON.stringify(toolFailure(response)));
   const updated = calls.find((call) => new URL(call.url).pathname === "/trpc/issue.updateDraft");
   assert.ok(updated);
   const body = JSON.parse(String(updated.init?.body));
@@ -1103,7 +1102,7 @@ test("issue.create_draft forwards segmentId to issue.createDraft", async () => {
     { publicationId: "pub_1", title: "Win back", segmentId: "seg_1" },
     fetchImpl
   );
-  assert.equal(response.error, undefined, JSON.stringify(response.error));
+  assert.equal(toolFailure(response), undefined, JSON.stringify(toolFailure(response)));
   const created = calls.find((call) => new URL(call.url).pathname === "/trpc/issue.createDraft");
   assert.ok(created);
   const body = JSON.parse(String(created.init?.body));
@@ -1113,7 +1112,7 @@ test("issue.create_draft forwards segmentId to issue.createDraft", async () => {
 test("issue.create_draft sends no segmentId when the agent passed none", async () => {
   const { calls, fetchImpl } = recording(() => trpcOk({ id: "iss_1", status: "draft" }));
   const response = await callTool("issue.create_draft", { publicationId: "pub_1", title: "Hello" }, fetchImpl);
-  assert.equal(response.error, undefined, JSON.stringify(response.error));
+  assert.equal(toolFailure(response), undefined, JSON.stringify(toolFailure(response)));
   const created = calls.find((call) => new URL(call.url).pathname === "/trpc/issue.createDraft");
   assert.ok(created);
   assert.equal("segmentId" in JSON.parse(String(created.init?.body)), false);
@@ -1128,7 +1127,7 @@ test("issue.update_draft forwards a segmentId, forwards null to clear it, and om
     { issueId: "iss_1", title: "Only the subject" }
   ]) {
     const response = await callTool("issue.update_draft", args, fetchImpl);
-    assert.equal(response.error, undefined, JSON.stringify(response.error));
+    assert.equal(toolFailure(response), undefined, JSON.stringify(toolFailure(response)));
     bodies.push(JSON.parse(String(calls.at(-1)?.init?.body)));
   }
   for (const call of calls) {
@@ -1176,7 +1175,7 @@ test("segment.create forwards inactive_days as a number", async () => {
     { publicationId: "pub_1", name: "Silent 90", inactive_days: 90 },
     fetchImpl
   );
-  assert.equal(response.error, undefined, JSON.stringify(response.error));
+  assert.equal(toolFailure(response), undefined, JSON.stringify(toolFailure(response)));
   assert.equal(new URL(calls[0]!.url).pathname, "/v1/segments");
   assert.deepEqual(JSON.parse(String(calls[0]!.init?.body)), {
     publication_id: "pub_1",
@@ -1199,7 +1198,7 @@ test("segment.update forwards inactive_days, forwards null to clear it, and omit
     { publicationId: "pub_1", segmentId: "seg_1", name: "Renamed" }
   ]) {
     const response = await callTool("segment.update", args, fetchImpl);
-    assert.equal(response.error, undefined, JSON.stringify(response.error));
+    assert.equal(toolFailure(response), undefined, JSON.stringify(toolFailure(response)));
   }
   const bodies = calls.map((call) => JSON.parse(String(call.init?.body)));
   assert.deepEqual(bodies[0], { inactive_days: 30 });
@@ -1208,11 +1207,14 @@ test("segment.update forwards inactive_days, forwards null to clear it, and omit
 });
 
 test("the segment_add step says an inactive_days segment is a filter too", async () => {
-  // Both places an agent reads it: the step help inlined into the automation
-  // write tools, and the machine-readable step catalog resource.
+  // Both places an agent reads it: the step help on the automation write
+  // tools' step config, and the machine-readable step catalog resource.
   for (const name of ["automation.create", "automation.update"]) {
+    const steps = (findTool(name).inputSchema.properties?.steps ?? {}) as {
+      items?: { properties?: { config?: { description?: string } } };
+    };
     assert.match(
-      findTool(name).description,
+      steps.items?.properties?.config?.description ?? "",
       /segment_add: \{segment_id\} \([^)]*status_filter, query_filter or inactive_days/,
       `${name}'s step help names every filter kind`
     );
@@ -1241,8 +1243,8 @@ test("issue.create_draft refuses a segmentId that is empty, blank, not a string,
       { publicationId: "pub_1", title: "Win back", segmentId },
       fetchImpl
     );
-    const message = response.error?.message ?? "";
-    assert.ok(response.error, `segmentId ${JSON.stringify(segmentId)} was accepted`);
+    const message = toolFailure(response)?.message ?? "";
+    assert.ok(toolFailure(response), `segmentId ${JSON.stringify(segmentId)} was accepted`);
     assert.match(message, /omit segmentId to send to all active contacts/i);
     assert.equal(
       calls.some((call) => new URL(call.url).pathname === "/trpc/issue.createDraft"),
@@ -1256,13 +1258,13 @@ test("issue.update_draft refuses a segmentId that is empty, blank or not a strin
   for (const segmentId of ["", "   ", 42]) {
     const { calls, fetchImpl } = recording(() => trpcOk({ id: "iss_1", status: "draft" }));
     const response = await callTool("issue.update_draft", { issueId: "iss_1", segmentId }, fetchImpl);
-    assert.ok(response.error, `segmentId ${JSON.stringify(segmentId)} was accepted`);
-    assert.match(response.error?.message ?? "", /pass null on issue\.update_draft to clear it/i);
+    assert.ok(toolFailure(response), `segmentId ${JSON.stringify(segmentId)} was accepted`);
+    assert.match(toolFailure(response)?.message ?? "", /pass null on issue\.update_draft to clear it/i);
     assert.equal(calls.length, 0, `segmentId ${JSON.stringify(segmentId)} still wrote the draft`);
   }
   const { calls, fetchImpl } = recording(() => trpcOk({ id: "iss_1", status: "draft" }));
   const response = await callTool("issue.update_draft", { issueId: "iss_1", segmentId: null }, fetchImpl);
-  assert.equal(response.error, undefined, JSON.stringify(response.error));
+  assert.equal(toolFailure(response), undefined, JSON.stringify(toolFailure(response)));
   assert.deepEqual(JSON.parse(String(calls[0]!.init?.body)), { issueId: "iss_1", segmentId: null });
 });
 
@@ -1291,12 +1293,12 @@ test("segment.delete names the posts that hold the segment when it is refused", 
     })
   );
   const response = await callTool("segment.delete", { publicationId: "pub_1", segmentId: "seg_1" }, fetchImpl);
-  const message = response.error?.message ?? "";
+  const message = toolFailure(response)?.message ?? "";
   assert.match(message, /code: segment_in_use/);
   assert.match(message, /iss_1/);
   assert.match(message, /iss_2/);
   assert.match(message, /issue\.update_draft/);
-  assert.deepEqual((response.error?.data as { posts?: unknown } | undefined)?.posts, posts);
+  assert.deepEqual((toolFailure(response)?.data as { posts?: unknown } | undefined)?.posts, posts);
 });
 
 // --- Email only from MCP (review follow-up, October 2026) -------------------

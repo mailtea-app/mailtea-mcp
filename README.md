@@ -56,7 +56,7 @@ Current prompts:
 - `newsletter.draft_from_brief`: arguments `brief` (required), `audience`, `tone`, `call_to_action`
 - `newsletter.subject_line_pack`: arguments `topic` (required), `count` (1 to 30, default 10), `audience`
 
-`ai.generate_draft` returns a placeholder scaffold, not written copy: no AI model runs on Mailtea's side. Write the email yourself and save it with `issue.create_draft`.
+No tool writes copy: no AI model runs on Mailtea's side. Write the email yourself and save it with `issue.create_draft`.
 
 Every tool in `tools/list` carries a `title` and the four MCP tool annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`), the same on stdio and on the hosted server. Every send (including `issue.schedule`, `event.send` and `automation.enable`), every delete, and every consent or suppression change is marked destructive; anything that emails recipients, changes the public website, looks up public DNS or points a webhook at an outside URL is marked open world. The full table and the rules behind it are in the [MCP server docs](https://docs.mailtea.app/docs/documentation/mcp-server#tool-safety-hints).
 
