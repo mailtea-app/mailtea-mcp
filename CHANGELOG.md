@@ -97,6 +97,16 @@ All notable changes to `mailtea-mcp` are documented here.
 - Changed: the `webhook.create` and `webhook.update` descriptions link to the
   event reference at https://docs.mailtea.app/docs/api-reference/webhooks/events
   for event names and payload shapes.
+- Fixed: the `site.page_upsert` description no longer contradicts itself. It
+  said both that the tool writes the live page and that writes land on the
+  draft until `site.publish`. The tool writes the live document, so a
+  published page changes for visitors at once, and a pending draft on the page
+  is kept and replaces the write on the next `site.publish`. The description
+  now says so, in 1,197 characters instead of 1,917. The page document format
+  is described once, on `site.apply_ops`, where the draft sentence is true;
+  `site.get` and `site.page_get` point there, and `site.get` names
+  `site.apply_ops` as the tool that passes `draftVersion` back as
+  `baseVersion`. The bundled `mailtea-site-builder` skill says the same.
 
 ## 0.21.0 (2026-10-03)
 

@@ -21,7 +21,8 @@ Two rules before anything else:
    standing instruction for how this site should look. Follow it strictly. It
    outranks your own taste and anything in the "craft rules" below.
 2. **Never call `site.publish` unless the user explicitly asked to publish.**
-   All your writes land on the draft. The operator previews and ships it.
+   `site.apply_ops` writes land on the draft. The operator previews and ships
+   it. `site.page_upsert` is the exception: it writes the live document.
 
 ## The document model
 
@@ -100,7 +101,7 @@ bookish `Palatino, 'Book Antiqua', Georgia, serif` · humanist `'Trebuchet MS', 
 ## Workflow protocol
 
 1. **`site.get`** — read the design brief (follow it), the current design, and
-   `draftVersion`. Every write passes the last `draftVersion` back as `baseVersion`.
+   `draftVersion`. `site.apply_ops` passes the last `draftVersion` back as `baseVersion`.
 2. **`site.pages_list` / `site.page_get`** — see what exists before changing it.
    `site.page_get` returns the draft-coalesced document with real node ids; those
    ids are what `edit_copy`, `edit_style` and `arrange` address.
@@ -113,7 +114,7 @@ bookish `Palatino, 'Book Antiqua', Georgia, serif` · humanist `'Trebuchet MS', 
    wrote in between: re-read with `site.get` + `site.page_get`, rebuild the batch
    against the new document, and only then retry. Never retry a batch blind — its
    node ids may no longer exist.
-5. **Preview.** All writes are on the DRAFT; the public site is unchanged.
+5. **Preview.** Ops are on the DRAFT; the public site is unchanged.
    The authenticated preview is `/site/preview` in Mailtea Studio
    (`https://studio.mailtea.app/site/preview`, or `http://localhost:3052/site/preview`
    in dev); a specific page is `/site/preview/<slug>`. Screenshot it and look at it.
@@ -138,6 +139,12 @@ values are clamped, overflow past the caps is discarded, malformed blocks vanish
 evidence that your document was stored as sent. If you use it, read the page back
 with `site.page_get` and diff it against what you sent, and say so in your report
 to the user.
+
+`site.page_upsert` also writes the page's **live** document, not the draft. A
+published page changes for visitors at once, with no preview. If the page has a
+pending draft (`hasDraft` on `site.page_get`), that draft is kept:
+`site.page_get` keeps returning it, and the next `site.publish` replaces your
+upsert with it.
 
 `site.apply_ops` is the safe path, and the reason is exactly this. Its report
 names what happened:
