@@ -739,7 +739,7 @@ const TEMPLATE_VARIABLES_SCHEMA = {
         description: `Variable name, pattern ${TEMPLATE_VARIABLE_KEY_PATTERN}, max ${TEMPLATE_VARIABLE_KEY_MAX_LENGTH} chars — letters, numbers, dots, dashes and underscores, starting with a letter, "_", "$" or "@". Dots address into send context ("contact.first_name"). A name outside this shape is refused: it would store fine and then never substitute, delivering its own braces to a subscriber.`
       },
       type: { type: "string", enum: ["string", "number"] },
-      fallback_value: {}
+      fallback_value: { type: ["string", "number"], description: "Value used when a send supplies none." }
     },
     required: ["key", "type"]
   }
@@ -3822,7 +3822,7 @@ export const MCP_TOOLS = [
     // Open world: from now on, event data goes to the endpoint URL, which is outside Mailtea.
     ...toolHints("Create webhook", { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }),
     description:
-      "Register an outbound webhook endpoint that receives delivery/engagement events. Returns a signing_secret (shown only once) used to verify payloads.",
+      "Register an outbound webhook endpoint that receives delivery/engagement events. Returns a signing_secret (shown only once) used to verify payloads. Event names and payload shapes: https://docs.mailtea.app/docs/api-reference/webhooks/events",
     inputSchema: {
       type: "object",
       properties: {
@@ -3867,7 +3867,7 @@ export const MCP_TOOLS = [
     name: "webhook.update",
     // Open world: can point event data at a different outside URL.
     ...toolHints("Update webhook", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }),
-    description: "Update a webhook's endpoint, subscribed events, or enabled/disabled status.",
+    description: "Update a webhook's endpoint, subscribed events, or enabled/disabled status. Event names and payload shapes: https://docs.mailtea.app/docs/api-reference/webhooks/events",
     inputSchema: {
       type: "object",
       properties: {
@@ -4000,7 +4000,7 @@ export const MCP_TOOLS = [
           description: "Property key (starts with a letter; letters, numbers, underscores)."
         },
         type: { type: "string", enum: ["string", "number"] },
-        fallback_value: { description: "Default value when a contact has none (matches type)." },
+        fallback_value: { type: ["string", "number"], description: "Default value when a contact has none (matches type)." },
         description: { type: "string" }
       },
       required: ["key", "type"]
@@ -4025,7 +4025,7 @@ export const MCP_TOOLS = [
       type: "object",
       properties: {
         propertyId: { type: "string" },
-        fallback_value: {},
+        fallback_value: { type: ["string", "number", "null"], description: "New default value, or null to clear it." },
         description: { type: "string" }
       },
       required: ["propertyId"]

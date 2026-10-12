@@ -430,6 +430,23 @@ test("tools/list stays within its size budget", async () => {
   assert.ok(bytes < 210_000, `tools/list is ${bytes} bytes`);
 });
 
+test("every tool parameter declares a JSON Schema type (one level deep, plus array items)", () => {
+  // The connector directory scan flags a parameter with no type, so an agent cannot tell what to send.
+  const typed = (schema: Record<string, unknown>) =>
+    ["type", "enum", "anyOf", "oneOf", "$ref"].some((key) => key in schema);
+  const missing: string[] = [];
+  for (const tool of MCP_TOOLS as unknown as Array<{ name: string; inputSchema: { properties?: Record<string, Record<string, unknown>> } }>) {
+    for (const [param, schema] of Object.entries(tool.inputSchema.properties ?? {})) {
+      if (!typed(schema)) missing.push(`${tool.name}.${param}`);
+      const items = schema.items as { properties?: Record<string, Record<string, unknown>> } | undefined;
+      for (const [itemParam, itemSchema] of Object.entries(items?.properties ?? {})) {
+        if (!typed(itemSchema)) missing.push(`${tool.name}.${param}[].${itemParam}`);
+      }
+    }
+  }
+  assert.deepEqual(missing, [], "parameters without a type");
+});
+
 test("text repeated across tools is short", () => {
   const copies = new Map<string, number>();
   const walk = (value: unknown) => {

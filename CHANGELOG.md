@@ -90,6 +90,13 @@ All notable changes to `mailtea-mcp` are documented here.
   scheduled send resolves its audience when it goes out, so contacts who join
   after scheduling receive it. No package change: this is the API's behaviour
   once it is deployed.
+- Changed: `fallback_value` declares its JSON type on the contact property
+  tools and the template variables schema. `contact_property.create` takes a
+  string or number, and `contact_property.update` also takes null to clear the
+  default. Clients that check parameter types no longer see an untyped value.
+- Changed: the `webhook.create` and `webhook.update` descriptions link to the
+  event reference at https://docs.mailtea.app/docs/api-reference/webhooks/events
+  for event names and payload shapes.
 
 ## 0.21.0 (2026-10-03)
 
