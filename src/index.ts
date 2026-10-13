@@ -4912,9 +4912,9 @@ A step_run whose output carries \`recorded_after_run_ended: true\` finished AFTE
   },
   {
     name: "site.asset_delete",
-    ...toolHints("Delete image", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }),
+    ...toolHints("Remove image from library", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }),
     description:
-      "Remove an image from the publication's asset library. The stored file is KEPT and its URL keeps resolving, so images inside already-sent emails do not break — this only hides the asset from the library. Deleting an asset does NOT remove it from any email, template or page that references it; fix those first or they will keep showing it.",
+      "Remove an image from the publication's asset library so it no longer appears in the library or the picker. The stored file is kept and its URL keeps resolving, so already-sent emails do not break. Removing an asset does not edit any email, template or page that references it; update those first or they keep showing the image.",
     inputSchema: {
       type: "object",
       properties: {
