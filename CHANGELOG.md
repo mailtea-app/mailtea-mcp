@@ -4,6 +4,7 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
 
+- Changed: `site.asset_delete` is titled "Remove image from library" and its description says plainly that the file is kept and only the library entry goes away. The old title "Delete image" contradicted the behaviour.
 - Changed: a failed tool call is a tool result with `isError: true`, not a
   JSON-RPC error. The message is the first text block, and the API's code and
   HTTP status (what used to be `error.data`) are in `structuredContent` beside
