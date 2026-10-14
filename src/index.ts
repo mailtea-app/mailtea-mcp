@@ -1717,7 +1717,7 @@ const SITE_OP_SCHEMA = {
  * client that asked was told the wrong number; `version.test.ts` now ties the
  * two together.
  */
-export const SERVER_VERSION = "0.21.0";
+export const SERVER_VERSION = "0.22.0";
 
 /**
  * The publication a tool acts on — advertised as OPTIONAL on every tool that

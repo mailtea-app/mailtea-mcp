@@ -105,7 +105,7 @@ bookish `Palatino, 'Book Antiqua', Georgia, serif` · humanist `'Trebuchet MS', 
 2. **`site.pages_list` / `site.page_get`** — see what exists before changing it.
    `site.page_get` returns the draft-coalesced document with real node ids; those
    ids are what `edit_copy`, `edit_style` and `arrange` address.
-3. **`site.presets_list`** — the curated Section Library, with each preset's
+3. **`site.section_templates_list`** — the curated Section Library, with each preset's
    **slots**. Compose from presets. Hand-authoring raw blocks through
    `site.page_upsert` is the fallback for what presets genuinely cannot express,
    not the default — presets are designed, responsive, and theme-linked already.
@@ -152,7 +152,7 @@ names what happened:
 ```json
 { "applied": 2,
   "skipped": [ { "opIndex": 1, "op": "insert_section",
-                 "reason": "unknown_preset", "detail": "no section preset \"hero-big\"" } ] }
+                 "reason": "unknown_template", "detail": "no section preset \"hero-big\"" } ] }
 ```
 
 A skip is not an error — `applied: 2` with one skip means two ops landed and one
@@ -164,7 +164,7 @@ Skip reasons and what each is telling you:
 
 | Reason | Fix |
 |---|---|
-| `unknown_preset` | The id isn't in the library. Call `site.presets_list`. |
+| `unknown_template` | The id isn't in the library. Call `site.section_templates_list`. |
 | `unknown_node` | That node id isn't in the document. Re-read `site.page_get`. |
 | `unknown_slot_key` | The preset declares no such copy slot. Read its `slots`. |
 | `unknown_slot_field` | That node has no such writable field (e.g. `href` on a heading). |
@@ -327,7 +327,7 @@ Do not copy their content. Copy the *look*; write the words for this publication
 site.get { "publicationId": "pub_123" }
 
 // 2. Read the library and note the slot keys you'll fill.
-site.presets_list { "publicationId": "pub_123" }
+site.section_templates_list { "publicationId": "pub_123" }
 // → hero-centered  slots: eyebrow, headline, body, ctaLabel, ctaHref
 //   posts-grid     slots: headline
 //   subscribe-centered slots: headline, body, formHeadline, formBody, ctaLabel
@@ -387,13 +387,13 @@ success response:
 
 ```jsonc
 // → { "report": { "applied": 1, "skipped": [
-//       { "opIndex": 1, "op": "insert_section", "reason": "unknown_preset",
+//       { "opIndex": 1, "op": "insert_section", "reason": "unknown_template",
 //         "detail": "no section preset \"hero-massive\"" },
 //       { "opIndex": 2, "op": "edit_copy", "reason": "value_too_long",
 //         "detail": "button label max 120" } ] }, "draftVersion": 7 }
 ```
 
-One section went in. The second preset does not exist — call `site.presets_list`
+One section went in. The second preset does not exist — call `site.section_templates_list`
 and pick a real one. The button label was **refused, not truncated** — shorten it
 and send it again. Tell the user both things happened.
 
@@ -405,7 +405,7 @@ and send it again. Tell the user both things happened.
 | `site.pages_list` | Pages with ids, kinds, slugs, status. |
 | `site.page_get` | One page's full draft document — the source of node ids. |
 | `site.apply_ops` | Every edit: `set_theme`, `compose_page`, `insert_section`, `swap_section`, `edit_copy`, `edit_style`, `arrange`. |
-| `site.presets_list` | The Section Library with slots. Read before composing. |
+| `site.section_templates_list` | The Section Library with slots. Read before composing. |
 | `site.page_upsert` | Whole-document write. Last resort — see the parser warning. |
 | `site.asset_list` | Real image URLs from the publication's library. |
 | `site.design_brief_get` / `site.design_brief_set` | Read / write the standing design brief. |
@@ -418,6 +418,6 @@ Setup, if the MCP server isn't connected yet:
 claude mcp add mailtea -e MAILTEA_API_TOKEN=mt_pat_xxx -- npx -y mailtea-mcp
 ```
 
-The token needs the **`site:write`** scope and an **editor, admin, or owner** role on the publication — a full-access key has both. Reading (`site.get`, `site.pages_list`, `site.presets_list`, `site.asset_list`) needs neither. If a write comes back `Insufficient role`, the token is read-only, send-only, or tied to a viewer-role member: say so and ask the operator for a key with Website Builder access rather than retrying.
+The token needs the **`site:write`** scope and an **editor, admin, or owner** role on the publication — a full-access key has both. Reading (`site.get`, `site.pages_list`, `site.section_templates_list`, `site.asset_list`) needs neither. If a write comes back `Insufficient role`, the token is read-only, send-only, or tied to a viewer-role member: say so and ask the operator for a key with Website Builder access rather than retrying.
 
 Sending email rather than designing the site? Use the `mailtea` skill.

@@ -2,7 +2,7 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
-## Unreleased
+## 0.22.0 (2026-10-14)
 
 - Changed: `site.asset_delete` is titled "Remove image from library" and its description says plainly that the file is kept and only the library entry goes away. The old title "Delete image" contradicted the behaviour.
 - Changed: a failed tool call is a tool result with `isError: true`, not a
@@ -108,6 +108,7 @@ All notable changes to `mailtea-mcp` are documented here.
   `site.get` and `site.page_get` point there, and `site.get` names
   `site.apply_ops` as the tool that passes `draftVersion` back as
   `baseVersion`. The bundled `mailtea-site-builder` skill says the same.
+- Fixed: the bundled `mailtea-site-builder` skill names `site.section_templates_list`, not the old `site.presets_list`, and its skip reason is `unknown_template`.
 
 ## 0.21.0 (2026-10-03)
 
