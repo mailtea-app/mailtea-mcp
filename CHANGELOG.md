@@ -2,6 +2,14 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
+## 0.23.0 (2026-10-16)
+
+- Added: `email.inbound_reply` takes `to` and `headers`, and its description names the plan-limit reasons.
+- Changed: `email.inbound_reply` now acts on `to` and `headers`, which were dropped before. A `to` naming anyone but the original's From or Reply-To is refused (422 `reply_target_not_allowed`), and any header but `Auto-Submitted` and `X-Auto-Response-Suppress` is refused (400).
+- Added: `email.inbound_reply` takes `attachments` (advertised in its schema; the hosted connector takes requests up to 1 MB).
+- Added: `api_key.current` describes the key the connection uses.
+- Changed: `email.get` and `email.inbound_get` describe `message_id`, `reply_to`, the arrival checks and `attachments_withheld`.
+
 ## 0.22.0 (2026-10-14)
 
 - Changed: `site.asset_delete` is titled "Remove image from library" and its description says plainly that the file is kept and only the library entry goes away. The old title "Delete image" contradicted the behaviour.

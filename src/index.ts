@@ -1717,7 +1717,7 @@ const SITE_OP_SCHEMA = {
  * client that asked was told the wrong number; `version.test.ts` now ties the
  * two together.
  */
-export const SERVER_VERSION = "0.22.0";
+export const SERVER_VERSION = "0.23.0";
 
 /**
  * The publication a tool acts on — advertised as OPTIONAL on every tool that
@@ -3316,7 +3316,7 @@ export const MCP_TOOLS = [
     name: "email.get",
     ...toolHints("Get email", { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
     description:
-      "Retrieve a transactional email by id with its delivery status (last_event), the reason it failed if it did (error, failed_at), tracking counters (open_count, click_count), and dropped_recipients — anyone the message did not reach and why. to/cc/bcc are what was ASKED for; a partially-delivered send looks identical to a fully-delivered one unless you read dropped_recipients. Also returns mode; a test-mode row is marked [test] in the summary and was never delivered.",
+      "Retrieve a transactional email by id with its delivery status (last_event), the reason it failed if it did (error, failed_at), tracking counters (open_count, click_count), and dropped_recipients: anyone the message did not reach and why. to/cc/bcc are what was ASKED for; a partially-delivered send looks identical to a fully-delivered one unless you read dropped_recipients. Also returns mode; a test-mode row is marked [test] in the summary and was never delivered. Also returns message_id: the Message-ID header recipients see, in angle brackets, null until the email is sent.",
     inputSchema: {
       type: "object",
       properties: { id: { type: "string" } },
@@ -3439,7 +3439,7 @@ export const MCP_TOOLS = [
     name: "email.inbound_get",
     ...toolHints("Get inbound email", { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
     description:
-      "Retrieve a single inbound email by id (rxemail_): headers, html and text body, a signed download URL for the raw message, and its attachments. A body over 20,000 characters is cut with a marker; the raw message has all of it. Tenancy is resolved from the id, so no publicationId is needed.",
+      "Retrieve a single inbound email by id (rxemail_): headers, html and text body, a signed download URL for the raw message, and its attachments. A body over 20,000 characters is cut with a marker; the raw message has all of it. Tenancy is resolved from the id, so no publicationId is needed. It also returns reply_to (where a reply goes by default), the checks run on arrival (spam_verdict, virus_verdict, spf_verdict, dkim_verdict, dmarc_verdict: PASS, FAIL, GRAY, PROCESSING_FAILED or null) and attachments_withheld (true when the files were kept back after a failed virus check).",
     inputSchema: {
       type: "object",
       properties: { id: { type: "string", description: "Inbound email id (rxemail_)." } },
@@ -3476,7 +3476,7 @@ export const MCP_TOOLS = [
     // Not idempotent: idempotency_key is optional, and a repeat without it sends again.
     ...toolHints("Reply to inbound email", { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }),
     description:
-      "Reply to an inbound email. On Mailtea Cloud, a team with no verified sending domain may reply to THE PERSON WHO WROTE (the original's From) or to its own verified members — so answering a customer works — but cc/bcc get no such allowance, and an original whose Reply-To points elsewhere is refused rather than sent to either address (403, reason/code 'system_domain_recipient_restricted'). Verify a domain to lift all of it. The reply threads automatically — In-Reply-To, References, and the To (reply target) are all derived by the server from the original, so they are NOT inputs. Provide html and/or text. Omit `from` to send from the verified domain the mail was delivered to. Tenancy is resolved from the email id (no publicationId). Returns the resulting transactional email id (txemail_) with its status.",
+      "Reply to an inbound email. It threads automatically: In-Reply-To and References are set by the server from the original. It goes to the Reply-To when that is exactly one valid address, else the From when that is exactly one valid address, else 422 no_reply_target; pass `to` to name the From or a single-address Reply-To entry (anyone else is refused with 422 reply_target_not_allowed). On Mailtea Cloud, a team with no verified sending domain may reply to the person who wrote (the original's From) or to its own verified members, so answering a customer works, but cc and bcc get no such allowance, and a reply to a Reply-To that differs from the From is refused (403, reason/code system_domain_recipient_restricted); verify a domain to lift all of it, or pass `to` with the From. Provide html and/or text. Omit `from` to send from the verified domain the mail was delivered to. Attach files with attachments (up to 20, 6 MiB together; over the hosted Mailtea connector the whole request is limited to about 1 MB, while the local mailtea-mcp server takes 6 MiB). headers may set only Auto-Submitted and X-Auto-Response-Suppress. A plan limit answers 403 with reason daily_cap, monthly_cap or ramp_cap. Tenancy is resolved from the email id (no publicationId). Returns the resulting transactional email id (txemail_) and its status; email.get shows the Message-ID once it is sent.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3493,8 +3493,34 @@ export const MCP_TOOLS = [
         subject: { type: "string", description: "Defaults to the original subject with a single 'Re: ' prefix." },
         html: { type: "string", description: "HTML body (provide html and/or text)." },
         text: { type: "string", description: "Plain-text body (provide html and/or text)." },
+        to: {
+          type: ["string", "array"],
+          items: { type: "string" },
+          description: "Who the reply goes to: the original's From and/or Reply-To addresses only. Omit to answer the Reply-To when it is one valid address, else the From."
+        },
         cc: { type: "array", items: { type: "string" }, description: "CC addresses." },
         bcc: { type: "array", items: { type: "string" }, description: "BCC addresses." },
+        attachments: {
+          type: "array",
+          maxItems: 20,
+          description:
+            "Files to attach, the same shape as email.send's: up to 20, weighing 6 MiB together once decoded. Over the hosted Mailtea connector a whole request is limited to 1 MB, so files over about 700 KB in total need the REST API or the mailtea-mcp server run locally (6 MiB).",
+          items: {
+            type: "object",
+            properties: {
+              filename: { type: "string", description: "The name the recipient sees. No '/', '\\' or control characters." },
+              content: { type: "string", description: "The file, base64." },
+              content_type: { type: "string", description: "Defaults to application/octet-stream." },
+              content_id: { type: "string", description: "Set it and reference cid:<content_id> in the html to show an image inline." }
+            },
+            required: ["filename", "content"]
+          }
+        },
+        headers: {
+          type: "object",
+          additionalProperties: { type: "string" },
+          description: "Only Auto-Submitted and X-Auto-Response-Suppress, for automatic mail such as an acknowledgement (for example { \"Auto-Submitted\": \"auto-replied\" })."
+        },
         idempotency_key: { type: "string", description: "Optional key to make the reply idempotent (the Idempotency-Key header wins when both are set)." }
       },
       required: ["id"]
@@ -4232,6 +4258,16 @@ export const MCP_TOOLS = [
     name: "api_key.list",
     ...toolHints("List API keys", { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
     description: "List the team's API keys (token values are never returned).",
+    inputSchema: {
+      type: "object",
+      properties: {}
+    }
+  },
+  {
+    name: "api_key.current",
+    ...toolHints("Get current API key", { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
+    description:
+      "Describe the key this connection uses: its team, the publication it is scoped to and that publication's Mailtea-managed receiving domain, its scopes, whether it is live or test, and the team's plan limits (daily_limit and monthly_limit are hard limits, null means none; ramp is the new-team daily limit while it lasts). Needs no scope.",
     inputSchema: {
       type: "object",
       properties: {}
@@ -5996,6 +6032,16 @@ async function callRestApi<T>(
   body: unknown | undefined,
   options: McpRuntimeOptions
 ): Promise<T> {
+  return (await callRestApiWithStatus<T>(method, path, body, options)).payload;
+}
+
+/** Like callRestApi, but also returns the HTTP status for routes whose 2xx codes mean different things. */
+async function callRestApiWithStatus<T>(
+  method: "GET" | "POST" | "PATCH" | "DELETE",
+  path: string,
+  body: unknown | undefined,
+  options: McpRuntimeOptions
+): Promise<{ status: number; payload: T }> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const apiBaseUrl = resolveApiBaseUrl(options);
   const token = resolveToken(options);
@@ -6020,7 +6066,8 @@ async function callRestApi<T>(
   if (!httpResponse.ok) {
     const failure = new Error(
       describeRestFailure(payload, httpFallbackMessage(httpResponse.status, httpResponse.statusText))
-    ) as Error & { issues?: unknown; data?: unknown };
+    ) as Error & { issues?: unknown; data?: unknown; headline?: string };
+    failure.headline = asOptionalString(asObject(payload).error);
     // Automations answer a bad graph with coded `issues[]` alongside `error`. An
     // agent that can only see "400" cannot self-correct, so carry them along.
     if (Array.isArray((payload as any)?.issues)) {
@@ -6031,7 +6078,7 @@ async function callRestApi<T>(
     throw failure;
   }
 
-  return payload as T;
+  return { status: httpResponse.status, payload: payload as T };
 }
 
 /**
@@ -8494,24 +8541,36 @@ async function runTool(
 
   if (toolName === "email.inbound_reply") {
     const id = readRequiredString(args, "id");
-    // Threading (In-Reply-To/References), the reply target, and the Re: subject
-    // default are all derived server-side — the caller only supplies content and
-    // optional sender/cc/bcc. Forward just the recognized keys that are defined;
+    // Threading (In-Reply-To/References) and the Re: subject default are
+    // derived server-side. Forward just the recognized keys that are defined;
     // inboundReplySchema does the real validation.
     const body: Record<string, unknown> = {};
-    for (const key of ["from", "subject", "html", "text", "cc", "bcc", "idempotency_key"] as const) {
+    for (const key of ["from", "to", "subject", "html", "text", "cc", "bcc", "attachments", "headers", "idempotency_key"] as const) {
       if (args[key] !== undefined) body[key] = args[key];
     }
     if (body.html === undefined && body.text === undefined) {
       throw new Error("Provide 'html' and/or 'text' for the reply body.");
     }
-    const result = await callRestApi<{ id: string; status: string }>(
-      "POST",
-      `/v1/emails/inbound/${encodeURIComponent(id)}/reply`,
-      body,
-      options
-    );
-    return makeToolResult(`Reply queued as ${result.id} (${result.status}).`, result);
+    let reply: { status: number; payload: { id: string; status: string } };
+    try {
+      reply = await callRestApiWithStatus<{ id: string; status: string }>(
+        "POST",
+        `/v1/emails/inbound/${encodeURIComponent(id)}/reply`,
+        body,
+        options
+      );
+    } catch (error) {
+      // 409 reply_failed: an earlier reply with this key failed. Say so plainly.
+      const failed = error as { data?: { code?: string; reason?: string; status?: number }; headline?: string };
+      if (failed.data?.code === "reply_failed") {
+        // Keep the API's code, reason and status on the error so the tool result carries them.
+        throw Object.assign(new Error(`Reply failed: ${failed.headline ?? "it was not sent"}`), { data: failed.data });
+      }
+      throw error;
+    }
+    const result = reply.payload;
+    const lead = reply.status === 202 ? "Reply queued" : reply.status === 200 ? "Reply already sent" : "Reply accepted";
+    return makeToolResult(`${lead} as ${result.id} (${result.status}).`, result);
   }
 
   if (toolName === "issue.send_test") {
@@ -9284,6 +9343,22 @@ async function runTool(
     );
     return makeToolResult(
       `API key ${result.id} created in ${result.mode} mode. Store this token now — it won't be shown again: ${result.token}`,
+      result
+    );
+  }
+
+  if (toolName === "api_key.current") {
+    const result = await callRestApi<{
+      id: string;
+      mode: string;
+      scopes: string[];
+      publication: { id: string; name: string } | null;
+    }>("GET", "/v1/api-keys/current", undefined, options);
+    const reach = result.publication
+      ? `publication ${result.publication.name} (${result.publication.id})`
+      : "the whole team";
+    return makeToolResult(
+      `Key ${result.id} (${result.mode}) reaches ${reach}. Scopes: ${result.scopes.join(", ") || "none"}.`,
       result
     );
   }
