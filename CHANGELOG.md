@@ -2,6 +2,12 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
+## Unreleased
+
+- Added: `send_email` step `config.variants` (max 10 `{key, label?, when, template_id, subject?, variables?}`, first match wins; variant `variables` replace the defaults when present and inherit when absent) is documented in the `automation.create`/`update`/`validate` config help and the `mailtea://automations/step-types` resource, with the new `too_many_variants`, `invalid_variant_key` and `duplicate_variant_key` codes. `automation.preview_step` takes `variant` (a key forces it, `null` forces the step's own template, omitted picks like a real send) and its result text names the variant ("Variant: pro (matched)", "Variant: default", or "Variant: pro (forced; the automation would pick default)").
+- Added: `automation.preview_step` renders what a `send_email` step would send for a contact and a sample event (`event`, `contact_id`), using the published template and the worker's own variable resolution. Nothing is sent or saved. It returns `subject`, `html`, `text`, each variable with its `source`, and `warnings`. Read-only. Run it before `automation.enable`: `source: "missing"` or any warning means a mapping needs fixing. Warning codes are `variable_unresolved`, `variable_unmapped`, `mapping_unused`, `subject_empty` and `contact_not_active`. The key needs `templates:read`, and `contact_id` also needs `contacts:read` (403 otherwise; unknown contact is 404 `contact_not_found`). `trigger: {type, key?}` (the trigger_type and the trigger step's key) seeds `steps.<key>.event`. `subject_empty` also fires when the subject renders empty, and `variable_unresolved` can show `source: "default"`.
+- Changed: the `mailtea://automations/step-types` resource now documents `send_email` `variables`: each value is a literal string or `{"var": "<event.properties.*|contact.*|contact.properties.*|steps.*>", "default": "..."}`, and a mistyped path resolves to nothing silently, so check it with `automation.preview_step`.
+
 ## 0.23.0 (2026-10-16)
 
 - Added: `email.inbound_reply` takes `to` and `headers`, and its description names the plan-limit reasons.

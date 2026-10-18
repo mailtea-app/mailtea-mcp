@@ -360,6 +360,8 @@ test("pinned judgment calls", () => {
   // Mutations that persist nothing.
   assert.equal(hints("issue.preview_draft").readOnlyHint, true);
   assert.equal(hints("automation.validate").readOnlyHint, true);
+  assert.equal(hints("automation.preview_step").readOnlyHint, true);
+  assert.equal(hints("automation.preview_step").openWorldHint, false);
   assert.equal(hints("template.render").readOnlyHint, true);
   // A webhook sends event data to a URL outside Mailtea.
   assert.equal(hints("webhook.create").openWorldHint, true);

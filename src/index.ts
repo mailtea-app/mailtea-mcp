@@ -612,7 +612,7 @@ const DEFAULT_API_BASE_URL = "https://api.mailtea.app";
 
 /** Required/optional `config` keys per step type. Inlined into tool descriptions. */
 const AUTOMATION_STEP_CONFIG_HELP =
-  "Step config by type. trigger: {trigger_type, trigger_key?, filter?}; delay: {duration, unit} (unit: seconds|minutes|hours|days|weeks, max 365 days); condition: {rule}; wait_for_event: {event_name, timeout_seconds, filter?} (max 90 days); send_email: {template_id, sender_id?, subject?, reply_to?, variables?}; topic_add: {topic_id}; topic_remove: {topic_id}; segment_add: {segment_id} (member-list segments only: a segment with a status_filter, query_filter or inactive_days is refused with segment_is_filter); segment_remove: {segment_id}; contact_update: {properties}; http_request: {url, method?, headers?, body?, timeout_seconds?}; exit: {reason?}. An http_request step calls the URL the operator configures, which can be any third-party endpoint, when a contact reaches the step. Its response is not returned to the caller.";
+  "Step config by type. trigger: {trigger_type, trigger_key?, filter?}; delay: {duration, unit} (unit: seconds|minutes|hours|days|weeks, max 365 days); condition: {rule}; wait_for_event: {event_name, timeout_seconds, filter?} (max 90 days); send_email: {template_id, sender_id?, subject?, reply_to?, variables?, variants?}; topic_add: {topic_id}; topic_remove: {topic_id}; segment_add: {segment_id} (member-list segments only: a segment with a status_filter, query_filter or inactive_days is refused with segment_is_filter); segment_remove: {segment_id}; contact_update: {properties}; http_request: {url, method?, headers?, body?, timeout_seconds?}; exit: {reason?}. An http_request step calls the URL the operator configures, which can be any third-party endpoint, when a contact reaches the step. Its response is not returned to the caller.";
 
 /** Trigger catalog, inlined into the graph-authoring tool descriptions. */
 const AUTOMATION_TRIGGER_HELP =
@@ -925,12 +925,12 @@ const AUTOMATION_STEP_TYPE_CATALOG = {
       type: "send_email",
       config: {
         required: ["template_id"],
-        optional: ["sender_id", "subject", "reply_to", "variables"]
+        optional: ["sender_id", "subject", "reply_to", "variables", "variants"]
       },
       branches: ["next"],
       side_effecting: true,
       description:
-        "Send a published server template. Unresolvable variables fall back to the template's fallback_value, or an empty string when none is declared."
+        "Send a published server template. Each config.variables value is either a literal string or a mapping {\"var\": \"<event.properties.*|contact.*|contact.properties.*|steps.*>\", \"default\": \"...\"} read from the run when the email is sent; default is optional. Unresolvable variables fall back to the mapping's default, then the template's fallback_value, or an empty string when none is declared. A mistyped path (event.properties.nmae) resolves to nothing without any error, so run automation.preview_step before automation.enable: it renders the email for a sample contact and event and reports each variable's source. config.variants is a list (max 10) of {key, label?, when, template_id, subject?, variables?}: when is a condition rule, the first match wins, else the step's own template. A variant's variables replace the default mapping when present and inherit it when absent; subject overrides when present. Variant issues use paths config.variants[i].template_id and config.variants[i].when; codes too_many_variants, invalid_variant_key, duplicate_variant_key."
     },
     {
       type: "topic_add",
@@ -1045,6 +1045,9 @@ const AUTOMATION_STEP_TYPE_CATALOG = {
     "unknown_step_type",
     "invalid_step_label",
     "duplicate_step_label",
+    "too_many_variants",
+    "invalid_variant_key",
+    "duplicate_variant_key",
     "too_many_steps",
     "too_many_connections",
     "invalid_connection",
@@ -4401,6 +4404,78 @@ export const MCP_TOOLS = [
     }
   },
   {
+    name: "automation.preview_step",
+    ...toolHints("Preview automation email step", { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }),
+    description: `Render what a send_email step would send, using the template's PUBLISHED version and the worker's own variable resolution. Nothing is sent. Returns {subject, html, text, variables, warnings[], variant {matched, forced, available}}; variables maps names to {value, source}: event, contact, steps, literal, default or missing. A config.variables value is a literal string or {"var": "event.properties.plan", "default": "friend"}. A mistyped var path resolves to nothing silently, so source "missing" or ANY warning means fix it before automation.enable. Warning codes: variable_unresolved, variable_unmapped, mapping_unused (carry key; variable_unresolved can show source \"default\"), subject_empty (a send would 422), variant_rule_needs_run (force the variant), contact_not_active (contact unsubscribed/suppressed). Pass event for event.properties.*, contact_id for contact.* (needs contacts:read; key needs templates:read). Pass trigger {type, key: step key} to seed steps.<key>.event. Errors: 400 variant_not_found, 404 contact_not_found, 400 unsupported_step_type, 404 template_not_found, 422 template_not_published.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        publication_id: PUBLICATION_ID_SCHEMA,
+        variant: { type: ["string", "null"], description: "Omit: real pick. Key: force. null: own template." },
+        step: {
+          type: "object",
+          description: "The send_email step, as in an automation graph, without key.",
+          properties: {
+            type: { type: "string", enum: ["send_email"] },
+            config: {
+              type: "object",
+              properties: {
+                template_id: { type: "string" },
+                subject: { type: "string" },
+                variants: {
+                  type: "array",
+                  maxItems: 10,
+                  items: { type: "object" }
+                },
+                variables: {
+                  type: "object",
+                  description:
+                    'Keyed by variable name. A value is a literal string or {"var": "<event.properties.*|contact.*|contact.properties.*|steps.*>", "default": "..."}.',
+                  additionalProperties: {
+                    anyOf: [
+                      { type: "string" },
+                      {
+                        type: "object",
+                        properties: {
+                          var: { type: "string" },
+                          default: { type: "string" }
+                        },
+                        required: ["var"],
+                        additionalProperties: false
+                      }
+                    ]
+                  }
+                }
+              },
+              required: ["template_id"]
+            }
+          },
+          required: ["type", "config"]
+        },
+        contact_id: { type: "string", description: "Resolves contact.* mappings." },
+        trigger: {
+          type: "object",
+          description: "The automation's trigger step; seeds steps.<key>.event.",
+          properties: {
+            type: { type: "string", description: "The trigger_type." },
+            key: { type: "string", description: "The trigger STEP's key in the graph, not an event name." }
+          },
+          required: ["type"]
+        },
+        event: {
+          type: "object",
+          description: "Sample event that event.properties.* mappings read.",
+          properties: {
+            name: { type: "string" },
+            properties: { type: "object" }
+          },
+          required: ["name"]
+        }
+      },
+      required: ["step"]
+    }
+  },
+  {
     name: "automation.enable",
     // Destructive and open world: from now on the automation emails every contact it enrolls, and sent mail cannot be recalled.
     ...toolHints("Enable automation", { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true }),
@@ -6229,6 +6304,13 @@ function formatAutomationIssues(issues: AutomationValidationIssue[]): string {
     })
     .join("\n");
 }
+
+type AutomationStepPreviewResponse = {
+  subject: string;
+  variables?: Record<string, { value: string; source: string }>;
+  warnings?: Array<{ code: string; key?: string; message: string }>;
+  variant?: { matched: string | null; forced: boolean; available: string[] };
+};
 
 /**
  * `callRestApi` for the automation endpoints. Re-throws a graph rejection with
@@ -9557,6 +9639,52 @@ async function runTool(
     );
 
     return makeToolResult(`Graph is ${describeAutomationIssues(result)}`, result);
+  }
+
+  if (toolName === "automation.preview_step") {
+    const publicationId = await readPublicationId(args, options, "publication_id");
+    const step = readOptionalJsonObject(args, "step");
+    if (!step) throw new Error("Missing required argument: step");
+    const contactId = asOptionalString(args.contact_id);
+    const event = readOptionalJsonObject(args, "event");
+    const trigger = readOptionalJsonObject(args, "trigger");
+    const variant = args.variant === null ? null : asOptionalString(args.variant);
+
+    const result = await callAutomationApi<AutomationStepPreviewResponse>(
+      "POST",
+      "/v1/automations/preview-step",
+      {
+        publication_id: publicationId,
+        step,
+        ...(variant !== undefined && variant !== "" ? { variant } : {}),
+        ...(contactId ? { contact_id: contactId } : {}),
+        ...(trigger !== undefined ? { trigger } : {}),
+        ...(event !== undefined ? { event } : {})
+      },
+      options
+    );
+
+    const missing = Object.entries(result.variables ?? {})
+      .filter(([, variable]) => variable.source === "missing")
+      .map(([key]) => key);
+    const warnings = result.warnings ?? [];
+    const verdict =
+      missing.length === 0 && warnings.length === 0
+        ? "Every variable resolved."
+        : `Fix before automation.enable: ${[
+            missing.length > 0 ? `missing ${missing.join(", ")}` : "",
+            warnings.length > 0 ? `${warnings.length} warning(s): ${warnings.map((w) => w.message).join(" | ")}` : ""
+          ]
+            .filter(Boolean)
+            .join("; ")}.`;
+
+    const pick = result.variant?.matched ?? "default";
+    const variantLine = result.variant
+      ? result.variant.forced
+        ? ` Variant: ${variant ?? "default"} (forced${(variant ?? "default") !== pick ? `; the automation would pick ${pick}` : ""}).`
+        : ` Variant: ${result.variant.matched ? `${result.variant.matched} (matched)` : "default"}.`
+      : "";
+    return makeToolResult(`Preview of "${result.subject}" (nothing sent).${variantLine} ${verdict}`, result);
   }
 
   if (toolName === "automation.enable") {
