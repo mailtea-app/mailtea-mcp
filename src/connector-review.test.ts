@@ -427,9 +427,47 @@ test("tools/list stays within its size budget", async () => {
   // A tool that needs more room should take it from repetition, not raise this.
   // Raised 210,000 -> 212,000 for automation.preview_step (2.2K): its input
   // schema is the only place an agent learns the {"var": ...} mapping syntax.
+  // Raised 212,000 -> 213,000 for block visibility (211,996 -> 212,505 bytes).
+  // The cost is the mandated visibility sentence in EDITOR_DOC_HELP, which three
+  // tools carry, plus issue.preview's channel parameter. The email-ops block
+  // schemas are not part of tools/list, so nothing else is left to cut.
+  // The raw HTML visibility markers and issue.preview's gate div took it to
+  // 212,976 bytes, inside the budget with nothing raised.
+  // The footer and logo default to "email" took it to 212,996 bytes, the
+  // clause paid for by trimming the same two sentences.
+  // Holding back the "subscribers" visibility until reader sign-in took it
+  // to 212,723 bytes.
+  // Advertising visibility on issue.apply_ops (block specs and edit_block attrs)
+  // took it to 212,945 bytes, paid for by trimming the block-spec description.
   const reply = await handleMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/list" });
   const bytes = Buffer.byteLength(JSON.stringify(reply));
-  assert.ok(bytes < 212_000, `tools/list is ${bytes} bytes`);
+  assert.ok(bytes < 213_000, `tools/list is ${bytes} bytes`);
+});
+
+// Subscribers only is held back until reader sign-in (spec 4.1 and 6, owner
+// decision 2026-10-20): today a subscriber opening the web page gets the
+// subscribe form like anyone else. No tool offers it, in prose or in a raw
+// HTML marker. A stored block still renders as before; that is documented
+// for maintainers only (internal docs).
+test("no tool offers the held-back subscribers visibility", () => {
+  // Quoted values, markers, the option's name, and a plain list such as
+  // "visibility (all, email, web or subscribers)". "subscribers" and not
+  // "subscri": a topic's visibility (public or private) talks about a
+  // reader's subscription.
+  const offers = (text: string) =>
+    /mailtea:visibility [^>]*subscribers|"subscribers"|subscribers-only|Subscribers only/.test(text) ||
+    /visib[^.]{0,160}subscribers/i.test(text);
+  assert.ok(offers("Any content block also takes visibility (all, email, web or subscribers)."));
+  assert.ok(offers("<!--mailtea:visibility email|web|subscribers-->"));
+  assert.ok(!offers("Any content block also takes visibility (all, email or web)."));
+  const offending: string[] = [];
+  for (const tool of MCP_TOOLS) {
+    if (offers(JSON.stringify(tool).replace(/\\"/g, '"'))) offending.push(tool.name);
+  }
+  assert.deepEqual(offending, []);
+  const help = JSON.stringify(MCP_TOOLS.find((tool) => tool.name === "template.create"));
+  assert.match(help, /attrs\.visibility: \\"all\\" \(default\), \\"email\\" \(default for footer and logo\) or \\"web\\"/);
+  assert.match(help, /<!--mailtea:visibility email\|web-->/);
 });
 
 test("every tool parameter declares a JSON Schema type (one level deep, plus array items)", () => {

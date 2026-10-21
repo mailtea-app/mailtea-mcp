@@ -650,7 +650,7 @@ const EVENT_SCHEMA_DOCUMENT_HELP = `schema_json is a Mailtea event schema docume
  * reason `AUTOMATION_STEPS_SCHEMA` keeps `config` flat: MCP clients vary in how
  * much JSON Schema they honour, and discriminated unions are where they break.
  */
-const EDITOR_DOC_HELP = `editor_doc is a TipTap/ProseMirror document, {"type":"doc","content":[ ...block nodes ]}. The server renders the email HTML from it and stores that, and refuses a request that also carries html. Every node is {"type":"...","attrs":{...},"content":[...]}. Block nodes that render: paragraph, heading (attrs.level 1-6), bulletList / orderedList / listItem, blockquote, horizontalRule, image (attrs.src, attrs.alt), button (attrs.href, attrs.variant "filled"|"outline", attrs.alignment "left"|"center"|"right", attrs.fullWidth), spacer (attrs.height "sm"|"md"|"lg"|"xl"), table, twoColumns / threeColumns / fourColumns each wrapping columnsColumn children, linkCard, logo, footer, htmlCodeBlock, section. Text is {"type":"text","text":"..."} carrying optional marks: bold, italic, underline, strike, code, sub, sup, textStyle, and link (attrs.href). A "subtitle" string on the doc root becomes the inbox preview text. Minimal example: {"type":"doc","content":[{"type":"heading","attrs":{"level":1},"content":[{"type":"text","text":"Hello"}]},{"type":"paragraph","content":[{"type":"text","text":"Welcome aboard."}]}]}. These node types render to NOTHING in email and their content is lost: youtube, xPost, threadsPost, codeBlock (use htmlCodeBlock for raw HTML); repeat and showIfKey render their content once, without the repetition or the condition. A document that renders to an empty email is refused with 400 editor_doc_unrenderable, and the response names the offending types in node_types. Bounds: 512 KB serialized, 256 KB per string, 40 levels deep.`;
+const EDITOR_DOC_HELP = `editor_doc is a TipTap/ProseMirror document, {"type":"doc","content":[ ...block nodes ]}. The server renders the email HTML from it and stores that, and refuses a request that also carries html. Every node is {"type":"...","attrs":{...},"content":[...]}. Block nodes that render: paragraph, heading (attrs.level 1-6), bulletList / orderedList / listItem, blockquote, horizontalRule, image (attrs.src, attrs.alt), button (attrs.href, attrs.variant "filled"|"outline", attrs.alignment "left"|"center"|"right", attrs.fullWidth), spacer (attrs.height "sm"|"md"|"lg"|"xl"), table, twoColumns / threeColumns / fourColumns each wrapping columnsColumn children, linkCard, logo, footer, htmlCodeBlock, section. Any block takes attrs.visibility: "all" (default), "email" (default for footer and logo) or "web". In raw HTML: <!--mailtea:visibility email|web-->...<!--/mailtea:visibility-->. Text is {"type":"text","text":"..."} carrying optional marks: bold, italic, underline, strike, code, sub, sup, textStyle, and link (attrs.href). A "subtitle" string on the doc root becomes the inbox preview text. Minimal example: {"type":"doc","content":[{"type":"heading","attrs":{"level":1},"content":[{"type":"text","text":"Hello"}]},{"type":"paragraph","content":[{"type":"text","text":"Welcome aboard."}]}]}. These node types render to NOTHING in email and their content is lost: youtube, xPost, threadsPost, codeBlock (use htmlCodeBlock for raw HTML); repeat renders its content once; a showifkey attribute hides the block for contacts whose property is empty. A document that renders to an empty email is refused with 400 editor_doc_unrenderable, and the response names the offending types in node_types. Bounds: 512 KB serialized, 256 KB per string, 40 levels deep.`;
 
 /**
  * `editor_doc` plus the fidelity sidecars that `html` alone cannot carry. Shared
@@ -1154,6 +1154,17 @@ const SITE_COPY_MAP_SCHEMA = {
 } as const;
 
 /**
+ * The `visibility` attribute, mirrored from `OFFERED_BLOCK_VISIBILITY_VALUES`:
+ * "subscribers" is held back until reader sign-in. Shared by the block specs
+ * and `edit_block`'s attrs.
+ */
+const EMAIL_BLOCK_VISIBILITY_SCHEMA = {
+  type: "string",
+  enum: ["all", "email", "web"],
+  description: "Default all; footer and logo default to email."
+} as const;
+
+/**
  * Every email block kind, mirrored by hand from `EMAIL_BLOCK_SPECS` in
  * @mailtea/contracts. `email-ops-catalog-parity.test.ts` fails if the two drift.
  *
@@ -1166,7 +1177,7 @@ const SITE_COPY_MAP_SCHEMA = {
 const EMAIL_BLOCK_SPEC_SCHEMA = {
   type: "object",
   description:
-    "One block. `kind` picks the type; the remaining keys are that kind's attributes. " +
+    "One block. `kind` picks the type; other keys are its attributes. " +
     "heading: text, level (1|2|3). " +
     "text: text. " +
     "bulletList / numberedList: items (1-50 strings). " +
@@ -1177,8 +1188,8 @@ const EMAIL_BLOCK_SPEC_SCHEMA = {
     "spacer: height (sm|md|lg|xl). " +
     "columns: columns (2-4 strings, one per column). " +
     "section: heading, text — a container; fill it with insert_blocks position \"append-into\". " +
-    "footer: text, alignment — fine print and the unsubscribe link. " +
-    "html: html (raw markup, sanitized to email-safe on render; use only when no other block fits). " +
+    "footer: text, alignment (fine print, unsubscribe link). " +
+    "html: html (raw markup, sanitized on render; a last resort). " +
     "variable: key, fallback, before, after — a personalization token, e.g. \"Hi {contact.first_name},\". " +
     "Text fields take inline markup: **bold**, *italic*, [label](https://url).",
   properties: {
@@ -1200,7 +1211,8 @@ const EMAIL_BLOCK_SPEC_SCHEMA = {
         "html",
         "variable"
       ]
-    }
+    },
+    visibility: EMAIL_BLOCK_VISIBILITY_SCHEMA
   },
   required: ["kind"]
 } as const;
@@ -1293,7 +1305,7 @@ const EMAIL_OP_SCHEMA = {
     {
       type: "object",
       description:
-        "compose — replace the email body wholesale. The only op that works on a draft created with contentHtml/contentSpec, because it never reads the old document.",
+        "compose: replace the email body wholesale. The only op that works on a draft created with contentHtml/contentSpec.",
       properties: {
         op: { type: "string", enum: ["compose"] },
         blocks: {
@@ -1370,6 +1382,7 @@ const EMAIL_OP_SCHEMA = {
           type: "object",
           description:
             "Attributes to set, keyed by name. Per node type — heading: level, textAlign; paragraph/footer: textAlign; button: href, variant, alignment, fullWidth, buttonColor, textColor, borderRadius, padding{Top,Right,Bottom,Left}; image: src, alt, alignment, width, height; logo: src, alt, size, width, alignment; spacer: height; htmlCodeBlock: code; linkCard: title, subtitle, description, imageSrc, imageAlt, url, urlTitle, badge; variable: key, fallback; columns rows: stackOnMobile.",
+          properties: { visibility: EMAIL_BLOCK_VISIBILITY_SCHEMA },
           additionalProperties: {
             anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }]
           }
@@ -1891,7 +1904,7 @@ export const MCP_TOOLS = [
         },
         templateId: { type: "string", description: "Seed the draft from a published server template's published version (see template.list). Takes precedence over contentHtml/contentSpec." },
         variables: { type: "object", description: "Key/value map substituted into the template's variable placeholders when templateId is set (both {{key}} and Visual Email Designer {key} forms). Values are HTML-escaped; use {{{key}}} in the template for raw HTML." },
-        contentHtml: { type: "string", description: "Raw HTML content (use this OR contentSpec OR templateId)" },
+        contentHtml: { type: "string", description: "Raw HTML content (use this OR contentSpec OR templateId). May wrap a block in <!--mailtea:visibility email|web-->...<!--/mailtea:visibility-->." },
         contentSpec: {
           type: "object",
           description: "json-render spec (flat element map). Use this OR contentHtml OR templateId. Properties: root (string, element key), elements (record of {type, props?, children?})",
@@ -1976,7 +1989,7 @@ export const MCP_TOOLS = [
           type: ["string", "null"],
           description: `Send this post to one audience segment, or null to clear it so the post goes to all active contacts. Omit to leave it unchanged. ${POST_SEGMENT_HELP}`
         },
-        contentHtml: { type: "string", description: "Raw HTML content (use this OR contentSpec)" },
+        contentHtml: { type: "string", description: "Raw HTML content (use this OR contentSpec). May wrap a block in <!--mailtea:visibility email|web-->...<!--/mailtea:visibility-->." },
         contentSpec: {
           type: "object",
           description: "json-render spec (flat element map). Use this OR contentHtml.",
@@ -2698,7 +2711,12 @@ export const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        issueId: { type: "string" }
+        issueId: { type: "string" },
+        channel: {
+          type: "string",
+          enum: ["email", "web"],
+          description: "Which version to render. web: the public page body without email-only blocks."
+        }
       },
       required: ["issueId"]
     }
@@ -7618,9 +7636,13 @@ async function runTool(
 
   if (toolName === "issue.preview") {
     const issueId = readRequiredString(args, "issueId");
+    const channel = asOptionalString(args.channel);
+    if (channel !== undefined && channel !== "email" && channel !== "web") {
+      throw new Error("Argument channel must be one of: email, web");
+    }
     const preview = await callTrpc<IssuePreview>(
       "issue.preview",
-      { issueId },
+      channel ? { issueId, channel } : { issueId },
       options,
       "query"
     );

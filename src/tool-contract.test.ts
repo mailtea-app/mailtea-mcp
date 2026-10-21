@@ -1410,3 +1410,21 @@ test("the domain region descriptions speak of Mailtea's regions, not a deploymen
     assert.doesNotMatch(description, /[\u2013\u2014]/);
   }
 });
+
+test("issue.preview accepts channel web", async () => {
+  assert.deepEqual(findTool("issue.preview").inputSchema.properties?.channel?.enum, ["email", "web"]);
+  const { calls, fetchImpl } = recording(() =>
+    trpcOk({ issueId: "iss_1", title: "T", html: "<p>x</p>", channel: "web" })
+  );
+  const response = await callTool("issue.preview", { issueId: "iss_1", channel: "web" }, fetchImpl);
+  assert.equal(toolFailure(response), undefined);
+  const url = new URL(calls[0]?.url ?? "");
+  assert.deepEqual(JSON.parse(url.searchParams.get("input") ?? "{}"), { issueId: "iss_1", channel: "web" });
+});
+
+test("issue.preview without a channel sends only the issue id", async () => {
+  const { calls, fetchImpl } = recording(() => trpcOk({ issueId: "iss_1", title: "T", html: "<p>x</p>" }));
+  await callTool("issue.preview", { issueId: "iss_1" }, fetchImpl);
+  const url = new URL(calls[0]?.url ?? "");
+  assert.deepEqual(JSON.parse(url.searchParams.get("input") ?? "{}"), { issueId: "iss_1" });
+});
