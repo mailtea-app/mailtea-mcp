@@ -1114,22 +1114,33 @@ const AUTOMATION_STEP_TYPE_CATALOG = {
  */
 const SITE_DOC_HELP = `A publication has exactly ONE site, made of pages. A page document is {"version":3,"sections":[...]}; a section is {"id","type":"section","blocks":[...]}. Blocks are discriminated on "type": heading, text, richText, button, link, image, embed, logo (src ""=publication logo, heightPx, href), icon, divider, spacer, subscribeForm, contactForm, unsubscribeForm, postHeader, postBody, postCollection, group (children[]), columns (columns[i].blocks[]). Every style/layout property is {"ref":"palette.accent"} (linked to the theme) or {"value":24} (a literal override). A ref stays linked to the theme, so a later theme change restyles it. Limits: 40 sections/page, 50 children per container, 200 nodes/page.`;
 
-/** The 12 theme tokens, mirrored from SITE_THEME_TOKEN_SPECS in @mailtea/contracts. */
+/**
+ * The 13 theme tokens, mirrored from SITE_THEME_TOKEN_SPECS in @mailtea/contracts.
+ * index.test.ts fails if the two lists drift.
+ */
 const SITE_THEME_TOKEN_PROPERTIES = {
-  "palette.pageBg": { type: "string", description: "Page background, #rrggbb." },
-  "palette.surfaceBg": { type: "string", description: "Card/band surface background, #rrggbb." },
-  "palette.text": { type: "string", description: "Primary body text, #rrggbb." },
-  "palette.muted": { type: "string", description: "Secondary/muted text, #rrggbb." },
-  "palette.accent": { type: "string", description: "Accent for buttons and links, #rrggbb." },
-  "palette.accentText": { type: "string", description: "Text drawn on top of the accent, #rrggbb." },
-  "palette.border": { type: "string", description: "Hairline border, #rrggbb." },
+  // The #rrggbb format is said once, on the tokens object, rather than on each
+  // of the seven colors: tools/list is paid for by every conversation, and the
+  // repetition paid for the button font token. The two font examples name one
+  // fallback each, which paid for saying how to clear the button font.
+  "palette.pageBg": { type: "string", description: "Page background." },
+  "palette.surfaceBg": { type: "string", description: "Card and band background." },
+  "palette.text": { type: "string", description: "Primary body text." },
+  "palette.muted": { type: "string", description: "Secondary text." },
+  "palette.accent": { type: "string", description: "Accent for buttons and links." },
+  "palette.accentText": { type: "string", description: "Text drawn on the accent." },
+  "palette.border": { type: "string", description: "Hairline border." },
   "typography.headingFont": {
     type: "string",
-    description: "Heading font stack, e.g. \"'Source Serif 4', Georgia, serif\"."
+    description: "Heading font stack, e.g. 'Source Serif 4', serif."
   },
   "typography.bodyFont": {
     type: "string",
-    description: "Body font stack, e.g. \"'Space Grotesk', system-ui, sans-serif\"."
+    description: "Body font stack, e.g. 'Space Grotesk', sans-serif."
+  },
+  "typography.buttonFont": {
+    type: "string",
+    description: "Button font stack. Set to an empty string to follow the body font again."
   },
   "typography.baseSizePx": { type: "string", description: "Base body size in px (12-22)." },
   "theme.radiusPx": { type: "string", description: "Corner radius in px (0-48)." },
@@ -1481,7 +1492,8 @@ const SITE_OP_SCHEMA = {
         op: { type: "string", enum: ["set_theme"] },
         tokens: {
           type: "object",
-          description: "Theme tokens to change. Omitted tokens keep their current value.",
+          description:
+            "Theme tokens to change. Omitted tokens keep their current value. Colors are #rrggbb.",
           properties: SITE_THEME_TOKEN_PROPERTIES,
           additionalProperties: false
         }

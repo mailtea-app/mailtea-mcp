@@ -439,6 +439,11 @@ test("tools/list stays within its size budget", async () => {
   // to 212,723 bytes.
   // Advertising visibility on issue.apply_ops (block specs and edit_block attrs)
   // took it to 212,945 bytes, paid for by trimming the block-spec description.
+  // The typography.buttonFont theme token took it to 213,061 bytes. Saying
+  // "#rrggbb" once on set_theme's tokens instead of on each of the seven
+  // colors, with shorter color descriptions, brought it back to 212,993.
+  // Saying an empty string clears the button font, paid for by one fallback
+  // per font example, took it to 212,988.
   const reply = await handleMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/list" });
   const bytes = Buffer.byteLength(JSON.stringify(reply));
   assert.ok(bytes < 213_000, `tools/list is ${bytes} bytes`);

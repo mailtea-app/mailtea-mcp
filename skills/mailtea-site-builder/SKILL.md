@@ -69,7 +69,7 @@ Page `kind` matters: `home`, `archive`, `custom` are ordinary pages; `post` is t
 posts at once, don't put one post's content in it); `unsubscribe` and
 `unsubscribe_success` are system pages that must keep their `unsubscribeForm`.
 
-## The 12 theme tokens
+## The 13 theme tokens
 
 These are the entire theme. `set_theme` writes them; every `{ref}` reads them.
 
@@ -84,6 +84,7 @@ These are the entire theme. `set_theme` writes them; every `{ref}` reads them.
 | `palette.border` | Hairline border, `#rrggbb`. |
 | `typography.headingFont` | Heading font stack, e.g. `'Source Serif 4', Georgia, serif`. |
 | `typography.bodyFont` | Body font stack, e.g. `'Space Grotesk', system-ui, sans-serif`. |
+| `typography.buttonFont` | Button font stack. Omitted, buttons follow the body font. Set to an empty string to follow the body font again. |
 | `typography.baseSizePx` | Base body size in px (12-22). |
 | `theme.radiusPx` | Corner radius in px (0-48). |
 | `theme.contentWidthPx` | Content column width in px (480-1280). |
@@ -173,7 +174,7 @@ Skip reasons and what each is telling you:
 | `value_too_long` | Over the field's limit. **Refused, never truncated** — shorten it. |
 | `bad_index` | Index outside the destination list. |
 | `page_full` | At the 40-section / 50-child / 200-node cap. Remove before adding. |
-| `unknown_token` / `bad_token_value` | Not one of the 12 tokens, or not a valid color / font stack / in-range number. |
+| `unknown_token` / `bad_token_value` | Not one of the 13 tokens, or not a valid color / font stack / in-range number. |
 | `unknown_style_prop` | Not a real style/layout property. See the model above. |
 | `not_a_container` / `cycle` | Illegal move target, or a move into the node's own subtree. |
 | `extract_failed` | `swap_section` carried no copy across — pass `fromPresetId`. |
@@ -296,13 +297,15 @@ Do not copy their content. Copy the *look*; write the words for this publication
    values, don't eyeball them: background and text colors, the accent used on
    buttons and links, border color, `font-family` on headings vs body, base font
    size, border radius, and the max width of the content column.
-2. **Map onto the 12 tokens.** Backgrounds → `palette.pageBg` / `palette.surfaceBg`;
+2. **Map onto the 13 tokens.** Backgrounds → `palette.pageBg` / `palette.surfaceBg`;
    body copy → `palette.text`, secondary → `palette.muted`; the button fill →
    `palette.accent` with its label color → `palette.accentText`; hairlines →
    `palette.border`. Fonts → the **nearest shipped stack** (a webfont you cannot
    load renders as its fallback anyway, so pick the pairing whose *character*
-   matches: serif display, all-sans, mono headings, bookish). Radius and content
-   width → `theme.radiusPx` / `theme.contentWidthPx`, clamped to their ranges.
+   matches: serif display, all-sans, mono headings, bookish). Buttons set in a
+   face of their own → `typography.buttonFont`; leave it out when they match the
+   body. Radius and content width → `theme.radiusPx` / `theme.contentWidthPx`,
+   clamped to their ranges.
 3. **Map sections to presets.** Walk the reference top to bottom and pick the
    closest preset per band (big statement + CTA → a hero; a feed of cards →
    `posts-grid` / `posts-list-*` / `posts-magazine`; a quote wall →
