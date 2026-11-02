@@ -4,6 +4,7 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
 
+- Changed (API): `domain.tracking_verify` registers the host and returns a `TXT` ownership record (`_railway-verify.<host>`) in `records`; `attached` turns `true` only once that TXT is published and the host has a certificate. The tool text says to publish it and verify again.
 - Changed (API): `domain.tracking_create`, and a `tracking_subdomain` on `domain.create` or `domain.update`, are refused with code `tracking_not_available` when the Mailtea deployment cannot serve tracking subdomains, instead of returning a CNAME that never goes live.
 - Fixed: `domain.tracking_verify` says when a verified host is not served yet (`attached: false`), so the text no longer reads as done while links stay on the Mailtea host.
 
