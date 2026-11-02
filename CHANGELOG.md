@@ -2,6 +2,11 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
+## Unreleased
+
+- Changed (API): `domain.tracking_create`, and a `tracking_subdomain` on `domain.create` or `domain.update`, are refused with code `tracking_not_available` when the Mailtea deployment cannot serve tracking subdomains, instead of returning a CNAME that never goes live.
+- Fixed: `domain.tracking_verify` says when a verified host is not served yet (`attached: false`), so the text no longer reads as done while links stay on the Mailtea host.
+
 ## 0.24.0 (2026-11-02)
 
 - Changed (API): `issue.unpublish_from_web`, `monetize.offer_upsert`, `monetize.offer_remove` and `publication.create` need `issues:send` (a `drafts_only` key gets 403). `email.list`, `email.get` and the `email.inbound_*` reads need `issues:read`, `contacts:read` or `issues:send`; every preset that read mail before still does, and `drafts_only` stays refused.

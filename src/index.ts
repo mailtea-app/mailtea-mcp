@@ -3817,7 +3817,7 @@ export const MCP_TOOLS = [
     name: "domain.tracking_create",
     ...toolHints("Add tracking subdomain", { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }),
     description:
-      "Add a tracking sub-domain (CNAME) under a domain — used to serve open-pixel/click-tracking links from your own domain. Returns the CNAME record to add, then call domain.tracking_verify.",
+      "Add a tracking subdomain (CNAME) to serve open and click links from your own domain. Returns the CNAME to add; then call domain.tracking_verify. Code 'tracking_not_available': this deployment cannot serve one yet.",
     inputSchema: {
       type: "object",
       properties: {
@@ -9046,13 +9046,19 @@ async function runTool(
     const publicationId = await readPublicationId(args, options);
     const domainId = readRequiredString(args, "domainId");
     const trackingDomainId = readRequiredString(args, "trackingDomainId");
-    const result = await callRestApi<{ id: string; full_name: string; status: string }>(
+    const result = await callRestApi<{ id: string; full_name: string; status: string; attached?: boolean }>(
       "POST",
       `/v1/domains/${encodeURIComponent(domainId)}/tracking-domains/${encodeURIComponent(trackingDomainId)}/verify?publication_id=${encodeURIComponent(publicationId)}`,
       undefined,
       options
     );
-    return makeToolResult(`Tracking domain ${result.full_name} is now ${result.status}.`, result);
+    // `verified` is about the customer's DNS only. Without the edge attach no
+    // link is built on the host, and the text must not read as "done".
+    const notServed =
+      result.status === "verified" && result.attached === false
+        ? " Its DNS is correct, but Mailtea is not serving it yet (attached: false), so links stay on the Mailtea host."
+        : "";
+    return makeToolResult(`Tracking domain ${result.full_name} is now ${result.status}.${notServed}`, result);
   }
 
   if (toolName === "domain.tracking_delete") {
