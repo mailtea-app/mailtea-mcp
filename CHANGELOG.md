@@ -2,8 +2,9 @@
 
 All notable changes to `mailtea-mcp` are documented here.
 
-## Unreleased
+## 0.24.0 (2026-11-02)
 
+- Changed (API): `issue.unpublish_from_web`, `monetize.offer_upsert`, `monetize.offer_remove` and `publication.create` need `issues:send` (a `drafts_only` key gets 403). `email.list`, `email.get` and the `email.inbound_*` reads need `issues:read`, `contacts:read` or `issues:send`; every preset that read mail before still does, and `drafts_only` stays refused.
 - Changed (API): a key that holds `issues:write` but neither `issues:send` nor `contacts:read` (the `drafts_only` shape) is refused `email.list`, `email.get` and the `email.inbound_*` read tools, which return email addresses; an `issues:read` key reads them as before. Also, `contacts:read` for per-contact engagement and the suppression search in Studio. A segment's `query_filter` is `null` for a key without `contacts:read`. A key without `issues:send` may edit only a draft that is not published to the web (`issue.update_draft`, `issue.apply_ops`, `issue.remove_draft`). Every shipped preset keeps what it had except `drafts_only`, which these exist to fence.
 - Added: `api_key.create` advertises `drafts_only` in its `permission` enum. The key writes, previews and lints drafts (`issue.create_draft`, `issue.update_draft`, `issue.apply_ops`, `issue.preview_draft`, `email.lint`) and reads templates, sections, senders, segments, topics and analytics, but `issue.send_now`, `issue.schedule`, `issue.send_test` and `issue.publish_to_web` are refused with 403 and contacts are out of reach. Changed (API): `issue.send_test` and `issue.publish_to_web` now need `issues:send` rather than `issues:write`, and `segment.list`, `segment.get` and `topic.list` accept a key with `issues:write` as well as one with `contacts:read`.
 - Added: `typography.buttonFont` is a thirteenth theme token for `site.apply_ops` `set_theme` and for `{ref}` values. Buttons (`button` blocks, the subscribe and unsubscribe buttons and "More posts") render in it; omitted, they follow the body font as before.
