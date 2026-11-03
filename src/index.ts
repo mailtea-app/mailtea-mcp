@@ -9056,7 +9056,7 @@ async function runTool(
     // link is built on the host, and the text must not read as "done".
     const notServed =
       result.status === "verified" && result.attached === false
-        ? " Its DNS is correct, but Mailtea is not serving it yet (attached: false), so links stay on the Mailtea host. If records has a TXT row, publish it, then verify again."
+        ? " Its DNS is correct, but Mailtea is not serving it yet (attached: false), so links stay on the Mailtea host. Its certificate is usually ready within minutes: verify again then."
         : "";
     return makeToolResult(`Tracking domain ${result.full_name} is now ${result.status}.${notServed}`, result);
   }
