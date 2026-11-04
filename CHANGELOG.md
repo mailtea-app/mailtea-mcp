@@ -4,6 +4,7 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
 
+- Added: `api_key.create` takes `permission: "drafts_and_templates"`: a `drafts_only` key plus `templates:write`. It never sends; `POST /v1/templates/:id/test` returns 403 for it.
 - Changed (API): `domain.tracking_verify` sets the host up, and `attached` turns `true` only once it has a certificate, usually a few minutes later. The tool text says to verify again then. The only record to publish is the CNAME.
 - Changed (API): `domain.tracking_create`, and a `tracking_subdomain` on `domain.create` or `domain.update`, are refused with code `tracking_not_available` when the Mailtea deployment cannot serve tracking subdomains, instead of returning a CNAME that never goes live.
 - Fixed: `domain.tracking_verify` says when a verified host is not served yet (`attached: false`), so the text no longer reads as done while links stay on the Mailtea host.

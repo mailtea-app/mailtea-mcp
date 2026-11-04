@@ -4266,14 +4266,14 @@ export const MCP_TOOLS = [
     name: "api_key.create",
     ...toolHints("Create API key", { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }),
     description:
-      "Create an API key (PAT). Needs settings:write AND every scope the new key grants. The token is shown ONCE. 'full_access': all scopes; 'sending_access': issue read/write/send; 'drafts_only': write drafts; no send, test send or contacts. mode 'test': sends are simulated, not delivered.",
+      "Create an API key. Needs settings:write and every scope it grants. The token is shown ONCE. 'full_access': all scopes; 'sending_access': issue read/write/send; 'drafts_only': write drafts, never send or read contacts; 'drafts_and_templates': that plus templates:write.",
     inputSchema: {
       type: "object",
       properties: {
         name: { type: "string", description: "Human label for the key (max 50 chars)." },
         permission: {
           type: "string",
-          enum: ["full_access", "sending_access", "drafts_only"],
+          enum: ["full_access", "sending_access", "drafts_only", "drafts_and_templates"],
           description: "Defaults to full_access."
         },
         domain_id: { type: "string", description: "Optional publication scope (not full_access)." },
