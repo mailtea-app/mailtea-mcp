@@ -676,7 +676,7 @@ const TEMPLATE_EDITOR_PROPERTIES = {
   style_profile: {
     type: "object",
     description:
-      "Colors, fonts and widths the design renders against: fontFamily, bodyBackground, cardBackground, textColor, headingColor, accentColor, textOnAccentColor, secondaryColor, linkColor, titleFontSizePx, bodyFontSizePx, borderRadiusPx, contentWidthPx, contentPaddingPx. Omit for the default profile."
+      "Colors, fonts and widths the design renders against: fontFamily, bodyBackground, cardBackground, textColor, headingColor, accentColor, textOnAccentColor, secondaryColor, linkColor, titleFontSizePx, bodyFontSizePx, borderRadiusPx, contentWidthPx, contentPaddingPx, dark (dark mode: the six colour names above, #rrggbb). Omit for the default profile."
   },
   mailtea_theme: {
     type: "object",
@@ -1298,7 +1298,18 @@ const EMAIL_STYLE_TOKEN_PROPERTIES = {
     description: "Padding around the body card, px on all four sides (0-96)."
   },
   bodyCornerRadius: { type: "string", description: "Body card corner radius in px (0-48)." },
-  bodyBorder: { type: "string", description: "Body card border width in px (0-8)." }
+  bodyBorder: { type: "string", description: "Body card border width in px (0-8)." },
+  darkMode: {
+    type: "string",
+    description:
+      "`on`: a dark theme for Apple Mail and Outlook apps (Gmail inverts the light design instead), derived from the light colours. `off` removes it. The dark* tokens (#rrggbb) override it and turn it on."
+  },
+  darkPageBackground: { type: "string", description: "Dark page colour." },
+  darkBodyBackground: { type: "string", description: "Dark body card colour." },
+  darkBodyText: { type: "string", description: "Dark text colour, 4.5:1 or more on the dark body." },
+  darkHeadingColor: { type: "string", description: "Dark heading colour." },
+  darkLinkColor: { type: "string", description: "Dark link colour, 4.5:1 or more on the dark body." },
+  darkBodyBorderColor: { type: "string", description: "Dark body border colour." }
 } as const;
 
 /**
@@ -1392,7 +1403,7 @@ const EMAIL_OP_SCHEMA = {
         attrs: {
           type: "object",
           description:
-            "Attributes to set, keyed by name. Per node type — heading: level, textAlign; paragraph/footer: textAlign; button: href, variant, alignment, fullWidth, buttonColor, textColor, borderRadius, padding{Top,Right,Bottom,Left}; image: src, alt, alignment, width, height; logo: src, alt, size, width, alignment; spacer: height; htmlCodeBlock: code; linkCard: title, subtitle, description, imageSrc, imageAlt, url, urlTitle, badge; variable: key, fallback; columns rows: stackOnMobile.",
+            "Attributes to set, keyed by name. Per node type — heading: level, textAlign; paragraph/footer: textAlign; button: href, variant, alignment, fullWidth, buttonColor, textColor, borderRadius, padding{Top,Right,Bottom,Left}, darkBackground, darkColor; section: darkBackground, darkColor; image: src, alt, alignment, width, height, darkSrc; logo: src, alt, size, width, alignment, darkSrc; spacer: height; htmlCodeBlock: code; linkCard: title, subtitle, description, imageSrc, imageAlt, url, urlTitle, badge; variable: key, fallback; columns rows: stackOnMobile.",
           properties: { visibility: EMAIL_BLOCK_VISIBILITY_SCHEMA },
           additionalProperties: {
             anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }]
@@ -1771,7 +1782,7 @@ export const SERVER_VERSION = "0.24.0";
 const PUBLICATION_ID_SCHEMA = {
   type: "string",
   description:
-    "Optional. Defaults to this connection's publication (for a team-scoped personal key, the only publication its owner has). If several are reachable, the error lists the ids."
+    "Optional. Defaults to this connection's publication (a team-scoped personal key: the owner's only publication). If several are reachable, the error lists the ids."
 } as const;
 
 /**

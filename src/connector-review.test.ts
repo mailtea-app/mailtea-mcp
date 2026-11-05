@@ -444,6 +444,9 @@ test("tools/list stays within its size budget", async () => {
   // colors, with shorter color descriptions, brought it back to 212,993.
   // Saying an empty string clears the button font, paid for by one fallback
   // per font example, took it to 212,988.
+  // Dark mode on issue.apply_ops (seven set_styles tokens, three edit_block
+  // attrs) and template style_profile, paid for by trimming the publicationId
+  // sentence served 123 times: 212,688.
   const reply = await handleMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/list" });
   const bytes = Buffer.byteLength(JSON.stringify(reply));
   assert.ok(bytes < 213_000, `tools/list is ${bytes} bytes`);

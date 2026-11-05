@@ -4,6 +4,8 @@ All notable changes to `mailtea-mcp` are documented here.
 
 ## Unreleased
 
+- Added: dark mode on `issue.apply_ops`. `set_styles` takes `darkMode` (`on` gives the email a dark theme derived from its light colours, `off` removes it) and `darkPageBackground`, `darkBodyBackground`, `darkBodyText`, `darkHeadingColor`, `darkLinkColor` and `darkBodyBorderColor` (`#rrggbb` only; setting one turns dark mode on). `edit_block` takes `darkSrc` on `image` and `logo` (the image shown in dark mode) and `darkBackground` / `darkColor` on `section` and `button`; an empty string clears each. `issue.get_editor` reads them back. The `style_profile` of `template.create` and `template.update` names its `dark` palette.
+- Changed: the shared `publicationId` description is shorter, with the same meaning, to make room in `tools/list`.
 - Added: `api_key.create` takes `permission: "drafts_and_templates"`: a `drafts_only` key plus `templates:write`. It never sends; `POST /v1/templates/:id/test` returns 403 for it.
 - Changed (API): `domain.tracking_verify` sets the host up, and `attached` turns `true` only once it has a certificate, usually a few minutes later. The tool text says to verify again then. The only record to publish is the CNAME.
 - Changed (API): `domain.tracking_create`, and a `tracking_subdomain` on `domain.create` or `domain.update`, are refused with code `tracking_not_available` when the Mailtea deployment cannot serve tracking subdomains, instead of returning a CNAME that never goes live.
